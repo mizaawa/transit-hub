@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Check, Link2, Loader2, Search, Server, X } from 'lucide-vue-next'
 import type { MySiteGroupRef, MySiteUpstreamTargetOption } from '../../types/mySites'
+import { upstreamTargetKey } from '../../utils/upstreamTargetKey'
 
 const props = defineProps<{
   open: boolean
@@ -21,7 +22,8 @@ const { t } = useI18n()
 const search = ref('')
 const selectedKeys = ref<string[]>([])
 const prefix = 'admin.groupAssociations.targetsDrawer'
-const targetKey = (target: MySiteGroupRef): string => `${target.siteId}\u0000${target.groupName}`
+// 复用共享实现，避免第三处各写一份分隔符格式。
+const targetKey = (target: MySiteGroupRef): string => upstreamTargetKey(target.siteId, target.groupName)
 
 watch(() => props.open, (open) => {
   if (!open) return

@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { X, Zap, ZapOff, Calculator, CircleHelp, Bell, BellOff, Copy, Check, Loader2 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { MySiteMapping, MySiteGroupRef, AutoPricingSource, AutoPricingStrategy } from '../../types/mySites'
+import { parseUpstreamTargetKey, upstreamTargetKey } from '../../utils/upstreamTargetKey'
 
 export interface BotOption {
   id: string
@@ -87,9 +88,12 @@ const toggleBot = (botId: string) => {
   }
 }
 
+// 主上游下拉框的值：编码/解码都走共享的复合 key 实现。
+// 原先用 `::` 拼接并按「第一个 ::」切分，分组名里含冒号时会切错位置
+// （例如 `tier::a` 会被解析成 siteId="site-1"、groupName="a"，丢掉前半段）。
 const primaryUpstreamKey = computed({
   get: () => primaryUpstreamSiteId.value && primaryUpstreamGroupName.value
-    ? `${primaryUpstreamSiteId.value}::${primaryUpstreamGroupName.value}`
+    ? upstreamTargetKey(primaryUpstreamSiteId.value, primaryUpstreamGroupName.value)
     : '',
   set: (val: string) => {
     if (!val) {
@@ -97,16 +101,18 @@ const primaryUpstreamKey = computed({
       primaryUpstreamGroupName.value = ''
       return
     }
-    const idx = val.indexOf('::')
-    if (idx >= 0) {
-      primaryUpstreamSiteId.value = val.slice(0, idx)
-      primaryUpstreamGroupName.value = val.slice(idx + 2)
-    }
+    const { siteId, groupName } = parseUpstreamTargetKey(val)
+    primaryUpstreamSiteId.value = siteId
+    primaryUpstreamGroupName.value = groupName
   }
 })
 
+// 必须用与父组件构建 Map 时完全相同的 key 格式。
+// 这里曾经本地拼 `${siteId}::${groupName}`，而父组件用 \u0000 作分隔符，
+// 于是查表永远返回 undefined —— 界面上明明有倍率，却提示
+// 「暂无可用上游倍率数据，无法计算预估倍率」。
 const getUpstreamMultiplier = (siteId: string, groupName: string): number | null => {
-  return props.upstreamMultipliers.get(`${siteId}::${groupName}`) ?? null
+  return props.upstreamMultipliers.get(upstreamTargetKey(siteId, groupName)) ?? null
 }
 
 const getUpstreamLabel = (siteId: string): string => props.upstreamLabels?.get(siteId) ?? siteId
@@ -336,8 +342,8 @@ const parseNumberInput = (value: string): number | null => {
                       <option value="" disabled>{{ t(`${prefix}.primaryUpstreamPlaceholder`) }}</option>
                       <option
                         v-for="target in upstreamTargets"
-                        :key="`${target.siteId}::${target.groupName}`"
-                        :value="`${target.siteId}::${target.groupName}`"
+                        :key="upstreamTargetKey(target.siteId, target.groupName)"
+                        :value="upstreamTargetKey(target.siteId, target.groupName)"
                       >
                         {{ target.groupName }} · {{ getUpstreamLabel(target.siteId) }}{{ getUpstreamMultiplier(target.siteId, target.groupName) != null ? ` · ${Number(getUpstreamMultiplier(target.siteId, target.groupName)!.toFixed(4))}×` : '' }}
                       </option>

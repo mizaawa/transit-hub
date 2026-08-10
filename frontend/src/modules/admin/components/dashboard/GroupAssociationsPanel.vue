@@ -30,6 +30,7 @@ import type {
   MySiteUpstreamTargetOption,
 } from '../../types/mySites'
 import type { UpstreamSiteResponse } from '../../types/upstream'
+import { upstreamTargetKey } from '../../utils/upstreamTargetKey'
 import AutoPricingConfigDrawer, { type BotOption } from './AutoPricingConfigDrawer.vue'
 import GroupAssociationTargetsDrawer from './GroupAssociationTargetsDrawer.vue'
 
@@ -69,7 +70,10 @@ const customUpstreamMultiplierInput = ref<string | number>('')
 const customSaleMultiplierInput = ref<string | number>('')
 let savedTimer: ReturnType<typeof setTimeout> | null = null
 
-const targetKey = (siteId: string, groupName: string): string => `${siteId}\u0000${groupName}`
+// 复合 key 的实现集中在 utils/upstreamTargetKey.ts。
+// 这里不要再本地定义：AutoPricingConfigDrawer 需要用同一套格式查询本组件构建的 Map，
+// 两边各写一份就会格式漂移，导致抽屉查不到倍率。
+const targetKey = upstreamTargetKey
 // Older deployments may have persisted a missing/null upstreamTargets field.
 // Keep rendering resilient even before the upgraded backend normalizes it.
 const mappingTargets = (mapping: MySiteMapping): MySiteGroupRef[] => (
