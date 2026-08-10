@@ -1,3 +1,10 @@
+# 仅用于本地开发的依赖服务（PostgreSQL + Redis），不要用于生产部署。
+#
+# 显式声明项目名，与 docker-compose.prod.yml 的 transithub-prod 区分开。
+# 两个文件同在 deploy/ 目录，若都依赖隐式的目录名作为项目名，就会共用项目 deploy，
+# 而两边的服务名同为 postgres/redis —— 启动开发依赖会把生产数据库容器按开发配置重建。
+name: transithub-dev
+
 services:
   postgres:
     image: postgres:16-alpine

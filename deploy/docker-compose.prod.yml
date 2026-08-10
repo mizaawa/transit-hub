@@ -3,6 +3,16 @@
 #
 # 本仓库为自维护版本，默认不发布公共镜像。请先按 README「自行构建镜像」一节
 # 在本机构建出 transithub:local，再执行 docker compose up。
+
+# 显式声明项目名，不要依赖「目录名」这个隐式默认值。
+# 未声明时项目名会回退成目录名 deploy，这会带来两个问题：
+#   1. 同目录下的 docker-compose.yml（开发依赖）也叫 deploy，两者服务名同为
+#      postgres/redis，于是启动开发依赖会把生产容器按开发配置重建，且把 app 判为孤儿；
+#   2. 宿主机上任何其它带 com.docker.compose.project=deploy 标签的容器都会被
+#      当作本项目的孤儿容器，触发 "Found orphan containers" 警告，
+#      一旦误用 --remove-orphans 就会把那些无关容器删掉。
+name: transithub-prod
+
 services:
   # TransitHub 应用服务：包含 Go 后端和已构建的前端静态文件。
   app:
