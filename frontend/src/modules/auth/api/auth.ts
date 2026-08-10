@@ -14,7 +14,21 @@ type ApiErrorPayload = {
   message?: string
 }
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
+/**
+ * 解析 VITE_API_BASE_URL。空字符串必须回退到 '/api'，否则请求会丢掉 /api 前缀、
+ * 命中前端 history 回退并拿到 index.html，导致 JSON 解析报
+ * `Unexpected token '<', "<script sr"... is not valid JSON`。
+ *
+ * 这里刻意不从 @/lib/apiClient 引入：apiClient 依赖本文件的 token/登出能力，
+ * 反向引用会形成模块循环。
+ */
+const resolveApiBaseUrl = (): string => {
+  const raw = import.meta.env.VITE_API_BASE_URL
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  return trimmed === '' ? '/api' : trimmed
+}
+
+const apiBaseUrl = resolveApiBaseUrl()
 
 const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
 
@@ -34,10 +48,26 @@ const requestJson = async <T>(path: string, options: RequestInit = {}, errorKey 
   }
 
   const text = await response.text()
-  const payload = text ? JSON.parse(text) as T & { message?: string } : ({} as T & { message?: string })
+  const contentType = response.headers.get('Content-Type') ?? ''
+  let payload = {} as T & { message?: string }
+  let parsed = text.trim() === ''
+  if (!parsed && contentType.includes('json')) {
+    try {
+      payload = JSON.parse(text) as T & { message?: string }
+      parsed = true
+    } catch {
+      parsed = false
+    }
+  }
 
   if (!response.ok) {
     throw new Error(payload.message ?? errorKey)
+  }
+
+  // 2xx 但响应体不是 JSON：通常是请求被错误地路由到了前端静态资源。
+  // 报告模块自己的错误 key，不要把 SyntaxError 抛给界面。
+  if (!parsed) {
+    throw new Error(errorKey)
   }
 
   return payload

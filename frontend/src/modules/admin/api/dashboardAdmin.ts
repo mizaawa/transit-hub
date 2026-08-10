@@ -1,56 +1,13 @@
 import type { DashboardAdminLoginForm, DashboardAdminStatus } from '../types/dashboardAdmin'
-import {
-  authUnauthorizedErrorKey,
-  getAccessToken,
-  handleAuthExpired,
-  isUnauthorizedApiResponse,
-} from '@/modules/auth/api/auth'
+import { requestJson as sharedRequestJson } from '@/lib/apiClient'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
-
-const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
-
-const authHeaders = (): HeadersInit => {
-  const token = getAccessToken()
-  if (!token) return {}
-  return { Authorization: `Bearer ${token}` }
-}
-
-type AdminErrorPayload = {
-  message?: string
-}
-
-// 与 mySites.ts 保持一致的请求封装：附带 TransitHub 鉴权头，并把后端返回的
-// i18n 错误 key 透传为 Error.message，由调用方用 t() 渲染。
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch (error) {
-    throw new Error('admin.dashboard.adminAuth.errors.network')
-  }
-
-  const text = await response.text()
-  const payload = text ? (JSON.parse(text) as T & AdminErrorPayload) : ({} as T & AdminErrorPayload)
-
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
-    }
-    throw new Error(payload.message ?? 'admin.dashboard.adminAuth.errors.request')
-  }
-
-  return payload
-}
+// 共享请求层负责：空 base URL 回退、非 JSON 响应降级、401 统一登出。
+// 这里只绑定本模块的错误 i18n key，由调用方用 t() 渲染。
+const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
+  sharedRequestJson<T>(path, options, {
+    network: 'admin.dashboard.adminAuth.errors.network',
+    request: 'admin.dashboard.adminAuth.errors.request',
+  })
 
 /** 查询当前用户的仪表盘 admin 登录状态。 */
 export const getDashboardAdminStatus = async (): Promise<DashboardAdminStatus> =>

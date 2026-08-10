@@ -13,56 +13,14 @@ import type {
   PolicyInput,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
-import {
-  authUnauthorizedErrorKey,
-  getAccessToken,
-  handleAuthExpired,
-  isUnauthorizedApiResponse,
-} from '@/modules/auth/api/auth'
+import { requestJson as sharedRequestJson } from '@/lib/apiClient'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
-
-const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
-
-const authHeaders = (): HeadersInit => {
-  const token = getAccessToken()
-  if (!token) return {}
-  return { Authorization: `Bearer ${token}` }
-}
-
-type ApiErrorPayload = {
-  message?: string
-}
-
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch {
-    throw new Error('admin.connectionHealth.errors.network')
-  }
-
-  const text = await response.text()
-  const payload = text ? (JSON.parse(text) as T & ApiErrorPayload) : ({} as T & ApiErrorPayload)
-
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
-    }
-    throw new Error(payload.message ?? 'admin.connectionHealth.errors.request')
-  }
-
-  return payload
-}
+// 共享请求层负责：空 base URL 回退、非 JSON 响应降级、401 统一登出。
+const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
+  sharedRequestJson<T>(path, options, {
+    network: 'admin.connectionHealth.errors.network',
+    request: 'admin.connectionHealth.errors.request',
+  })
 
 export const getConnectionHealthOverview = async (): Promise<ConnectionHealthOverview> =>
   requestJson<ConnectionHealthOverview>('/connection-health/overview')

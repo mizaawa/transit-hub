@@ -3,58 +3,14 @@ import {
   type DeleteAdminAccountResponse,
   type WorkspaceDeleteConfirmation,
 } from '../types/adminAccounts'
-import {
-  authUnauthorizedErrorKey,
-  getAccessToken,
-  handleAuthExpired,
-  isUnauthorizedApiResponse,
-} from '@/modules/auth/api/auth'
+import { requestJson as sharedRequestJson } from '@/lib/apiClient'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
-
-const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
-
-const authHeaders = (): HeadersInit => {
-  const token = getAccessToken()
-  if (!token) return {}
-  return { Authorization: `Bearer ${token}` }
-}
-
-type AdminErrorPayload = {
-  message?: string
-}
-
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch {
-    throw new Error('admin.adminAccounts.errors.network')
-  }
-
-  const text = await response.text()
-  const payload = text ? JSON.parse(text) as T & AdminErrorPayload : ({} as T & AdminErrorPayload)
-
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
-    }
-
-    const key = payload.message || 'admin.adminAccounts.errors.request'
-    throw new Error(key)
-  }
-
-  return payload
-}
+// 共享请求层负责：空 base URL 回退、非 JSON 响应降级、401 统一登出。
+const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
+  sharedRequestJson<T>(path, options, {
+    network: 'admin.adminAccounts.errors.network',
+    request: 'admin.adminAccounts.errors.request',
+  })
 
 export const listAdminAccounts = async (): Promise<AdminAccount[]> =>
   requestJson<AdminAccount[]>('/admin-accounts')

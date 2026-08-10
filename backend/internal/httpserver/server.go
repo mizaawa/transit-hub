@@ -413,7 +413,10 @@ func (s *Server) Handler() http.Handler {
 			}
 			r = r.WithContext(authctx.WithUserID(r.Context(), user.ID))
 		}
-		s.mux.ServeHTTP(w, r)
+		// 未注册的 /api 路径必须返回 JSON。net/http 默认的 404/405 body 是 text/plain，
+		// 前端请求层只能把它归为「响应不是合法 JSON」，报一个笼统的错误；
+		// 改写成结构化 message 后，前端可以据状态码区分「接口不存在」并做降级。
+		s.mux.ServeHTTP(newAPIErrorRewriter(w), r)
 	})))
 }
 

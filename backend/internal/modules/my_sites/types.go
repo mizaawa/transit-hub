@@ -41,6 +41,13 @@ type MappingRequest struct {
 	EnableAutoPricingNotify   bool               `json:"enableAutoPricingNotify"`
 	AutoPricingNotifyBotIDs   []string           `json:"autoPricingNotifyBotIds"`
 	AutoPricingNotifyTemplate string             `json:"autoPricingNotifyTemplate"`
+
+	// LastAutoPricingRun 是服务端独占写入的执行状态。前端编辑映射时会把从
+	// GET 拿到的整个 mapping 对象回传（例如只改「数据源」或只关闭自动调价），
+	// 因此请求体里一定会带上这个字段。这里必须显式声明它，否则 httpjson.Decode
+	// 的 DisallowUnknownFields 会把整个请求判为 400 admin.mySites.errors.request。
+	// 声明只为兼容回传，值永远被忽略：真实状态始终以数据库中已持久化的为准。
+	LastAutoPricingRun *AutoPricingRunStatus `json:"lastAutoPricingRun"`
 }
 
 // UpstreamGroupRef 上游分组的引用（站点 ID + 分组名）。

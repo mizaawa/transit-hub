@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	defaultPort       = "10621"
+	defaultPort       = "5478"
 	defaultRedisURL   = "redis://127.0.0.1:6379/0"
 	defaultPublicDir  = "/app/public"
 	defaultAppVersion = "v0.1.15"

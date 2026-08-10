@@ -24,12 +24,12 @@ RUN mkdir -p /app/data
 COPY --from=backend-builder /out/transithub-api /app/transithub-api
 COPY --from=frontend-builder /src/frontend/dist /app/public
 
-ENV PORT=10621
+ENV PORT=5478
 ENV PUBLIC_DIR=/app/public
 # 工单图片附件本地存储目录：/app/data 下的子目录，不在 PUBLIC_DIR（/app/public）之下，
 # 不会被当作公开静态资源暴露；docker-compose.prod.yml 需要把这个路径挂载成持久化 volume，
 # 否则容器重建后数据库里的附件 metadata 还在但图片文件会丢失。
 ENV TICKET_UPLOAD_DIR=/app/data/ticket-uploads
-EXPOSE 10621
+EXPOSE 5478
 
 ENTRYPOINT ["/app/transithub-api"]

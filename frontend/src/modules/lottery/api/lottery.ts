@@ -1,9 +1,4 @@
-import {
-  authUnauthorizedErrorKey,
-  getAccessToken,
-  handleAuthExpired,
-  isUnauthorizedApiResponse,
-} from '@/modules/auth/api/auth'
+import { requestJson as sharedRequestJson } from '@/lib/apiClient'
 import type {
   LotteryAuditResponse,
   LotteryCampaign,
@@ -15,51 +10,12 @@ import type {
   LotterySubscriptionGroupsResponse,
 } from '../types'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
-const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
-
-type AdminErrorPayload = { message?: string }
-
-const authHeaders = (): HeadersInit => {
-  const token = getAccessToken()
-  if (!token) return {}
-  return { Authorization: `Bearer ${token}` }
-}
-
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch {
-    throw new Error('admin.lottery.errors.network')
-  }
-
-  const text = await response.text()
-  let payload: T & AdminErrorPayload
-  try {
-    payload = text ? JSON.parse(text) as T & AdminErrorPayload : ({} as T & AdminErrorPayload)
-  } catch {
-    throw new Error('admin.lottery.errors.request')
-  }
-
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
-    }
-    throw new Error(payload.message ?? 'admin.lottery.errors.request')
-  }
-
-  return payload
-}
+// 共享请求层负责：空 base URL 回退、非 JSON 响应降级、401 统一登出。
+const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
+  sharedRequestJson<T>(path, options, {
+    network: 'admin.lottery.errors.network',
+    request: 'admin.lottery.errors.request',
+  })
 
 export const getLotteryEmbedConfig = async (): Promise<LotteryEmbedConfig> => (
   requestJson<LotteryEmbedConfig>('/lottery/embed-config')

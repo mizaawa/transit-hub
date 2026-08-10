@@ -3,6 +3,13 @@ export default {
     name: 'TransitHub',
     logoAlt: 'TransitHub 徽标'
   },
+  // 后端对未注册的 /api 路径统一返回这些 key，避免前端把纯文本 404 当成 JSON 解析。
+  api: {
+    errors: {
+      notFound: '接口不存在，请确认后端版本与反向代理的 /api 转发规则。',
+      methodNotAllowed: '该接口不支持当前请求方法。'
+    }
+  },
   nav: {
     features: '核心特性',
     integrations: '生态集成',

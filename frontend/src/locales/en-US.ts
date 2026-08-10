@@ -3,6 +3,14 @@ export default {
     name: 'TransitHub',
     logoAlt: 'TransitHub logo'
   },
+  // The backend returns these keys for unregistered /api paths so the frontend
+  // never has to parse a plain-text 404 as JSON.
+  api: {
+    errors: {
+      notFound: 'This API endpoint does not exist. Check the backend version and the /api proxy rules.',
+      methodNotAllowed: 'This API endpoint does not support the current request method.'
+    }
+  },
   nav: {
     features: 'Features',
     integrations: 'Integrations',

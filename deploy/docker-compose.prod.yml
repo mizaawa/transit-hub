@@ -1,10 +1,15 @@
 # TransitHub 生产部署示例。
 # 部署前必须修改所有 change-this-* 占位值，并确认镜像地址和版本号正确。
+#
+# 本仓库为自维护版本，默认不发布公共镜像。请先按 README「自行构建镜像」一节
+# 在本机构建出 transithub:local，再执行 docker compose up。
 services:
   # TransitHub 应用服务：包含 Go 后端和已构建的前端静态文件。
   app:
-    # 发布部署必须使用与代码内置版本号一致的固定镜像 tag。
-    image: deviseo/transithub:v0.1.15
+    # 默认使用本地自行构建的镜像。如果你把镜像推到了自己的仓库，
+    # 请改成带固定版本号的地址，例如 ghcr.io/mizaawa/transithub:v0.1.15。
+    # 不要使用 :latest，否则无法确定线上实际运行的是哪个版本。
+    image: transithub:local
     restart: unless-stopped
     depends_on:
       postgres:
@@ -12,10 +17,10 @@ services:
       redis:
         condition: service_healthy
     ports:
-      # 左侧 10621 是宿主机访问端口，可按需修改；右侧 10621 是容器内服务端口。
-      - "10621:10621"
+      # 左侧 5478 是宿主机访问端口，可按需修改；右侧 5478 是容器内服务端口。
+      - "5478:5478"
     environment:
-      PORT: "10621"
+      PORT: "5478"
       # PostgreSQL 连接串。这里的密码必须和 postgres.POSTGRES_PASSWORD 保持一致。
       DATABASE_URL: postgres://transithub:change-this-db-password@postgres:5432/transithub?sslmode=disable
       REDIS_URL: redis://redis:6379/0
@@ -34,6 +39,14 @@ services:
     volumes:
       # 持久化工单图片附件；不要挂载到 /app/public 之下，避免变成公开静态目录。
       - ../data/ticket-uploads:/app/data/ticket-uploads
+    healthcheck:
+      # 应用自带 /api/health，用它判断容器是否真正可用（而不只是进程存活）。
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:5478/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # 首次启动要跑数据库迁移，给足启动时间，避免迁移期间被误判为不健康。
+      start_period: 60s
 
   # PostgreSQL 数据库服务。
   postgres:
@@ -57,6 +70,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # 开启 AOF 持久化。仪表盘 admin 会话存放在 Redis，默认配置下容器重启会丢失
+    # 全部会话，导致所有工作区都需要重新登录上游 admin 账号。
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       # 持久化 Redis 数据。
       - ../data/redis:/data

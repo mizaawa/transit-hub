@@ -12,26 +12,8 @@ import type {
   UpstreamKeyItem,
   AdminResourceOption,
 } from '../types/mySites'
-import {
-  authUnauthorizedErrorKey,
-  getAccessToken,
-  handleAuthExpired,
-  isUnauthorizedApiResponse,
-} from '@/modules/auth/api/auth'
+import { isEndpointUnsupported, requestJson as sharedRequestJson } from '@/lib/apiClient'
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '/api'
-
-const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
-
-const authHeaders = (): HeadersInit => {
-  const token = getAccessToken()
-  if (!token) return {}
-  return { Authorization: `Bearer ${token}` }
-}
-
-type AdminErrorPayload = {
-  message?: string
-}
 
 const normalizeMappings = (value: unknown): MySiteMapping[] => {
   if (!Array.isArray(value)) return []
@@ -65,43 +47,11 @@ const normalizeMappingOptions = (response: MySiteMappingOptionsResponse): MySite
   staleTargets: Array.isArray(response.staleTargets) ? response.staleTargets : [],
 })
 
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch (error) {
-    throw new Error('admin.mySites.errors.network')
-  }
-
-  const text = await response.text()
-  let payload = {} as T & AdminErrorPayload
-  if (text) {
-    try {
-      payload = JSON.parse(text) as T & AdminErrorPayload
-    } catch {
-      payload = {} as T & AdminErrorPayload
-    }
-  }
-
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
-    }
-
-    throw new Error(payload.message ?? 'admin.mySites.errors.request')
-  }
-
-  return payload
-}
+const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
+  sharedRequestJson<T>(path, options, {
+    network: 'admin.mySites.errors.network',
+    request: 'admin.mySites.errors.request',
+  })
 
 export const getMySiteMappingOptions = async (): Promise<MySiteMappingOptionsResponse> => (
   normalizeMappingOptions(await requestJson<MySiteMappingOptionsResponse>('/my-sites/mapping-options'))
@@ -167,8 +117,13 @@ export const runAutoPricing = async (req: RunAutoPricingRequest): Promise<RunAut
   }
 }
 
-// New backends update one mapping atomically. A generic method-not-supported
-// response falls back to the legacy full-array PUT so rolling deployments remain usable.
+// 新后端支持单分组原子更新（PATCH）。只有当后端确实没有这个接口/方法时
+// （404/405）才降级为旧版全量 PUT，保证滚动升级期间可用。
+//
+// 这里必须按 HTTP 状态码判断，不能再按错误文案判断：早期实现只要拿到通用的
+// admin.mySites.errors.request 就降级，于是任何一次校验失败（400）都会把
+// 当前浏览器内存里的整份 mappings 全量写回，静默覆盖其他标签页/其他人的改动，
+// 而且真正的报错原因也被这次「成功的」全量保存掩盖掉了。
 export const saveMySiteMapping = async (mapping: MySiteMapping, currentMappings: MySiteMapping[]): Promise<MySiteStatus> => {
   try {
     return normalizeStatus(await requestJson<MySiteStatus>('/my-sites/mappings', {
@@ -176,7 +131,7 @@ export const saveMySiteMapping = async (mapping: MySiteMapping, currentMappings:
       body: JSON.stringify({ mapping }),
     }))
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== 'admin.mySites.errors.request') throw error
+    if (!isEndpointUnsupported(error)) throw error
     const nextMappings = currentMappings.some(item => item.ownGroup === mapping.ownGroup)
       ? currentMappings.map(item => item.ownGroup === mapping.ownGroup ? mapping : item)
       : [...currentMappings, mapping]
@@ -188,7 +143,7 @@ export const removeMySiteMapping = async (ownGroup: string, currentMappings: MyS
   try {
     return normalizeStatus(await requestJson<MySiteStatus>(`/my-sites/mappings/${encodeURIComponent(ownGroup)}`, { method: 'DELETE' }))
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== 'admin.mySites.errors.request') throw error
+    if (!isEndpointUnsupported(error)) throw error
     return saveMySiteMappings(currentMappings.filter(item => item.ownGroup !== ownGroup))
   }
 }
