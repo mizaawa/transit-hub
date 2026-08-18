@@ -8,6 +8,7 @@ import type {
 import { resetWorkspaceCheck } from '@/lib/workspaceGuard'
 
 export const authTokenStorageKey = 'transithub.auth.accessToken'
+export const authTokenExpiryKey = 'transithub.auth.tokenExpiry'
 export const authUnauthorizedErrorKey = 'auth.errors.unauthorized'
 
 type ApiErrorPayload = {
@@ -96,12 +97,28 @@ export const loginWithEmail = async (form: LoginRequest): Promise<AuthTokenRespo
 
 export const storeAccessToken = (accessToken: string): void => {
   localStorage.setItem(authTokenStorageKey, accessToken)
+  // JWT 通常有效期 1-24 小时，这里假设 1 小时，提前 5 分钟刷新
+  const expiryTime = Date.now() + 55 * 60 * 1000
+  localStorage.setItem(authTokenExpiryKey, expiryTime.toString())
 }
 
 export const getAccessToken = (): string | null => localStorage.getItem(authTokenStorageKey)
 
+export const getTokenExpiry = (): number | null => {
+  const expiry = localStorage.getItem(authTokenExpiryKey)
+  return expiry ? parseInt(expiry, 10) : null
+}
+
+export const isTokenExpiringSoon = (): boolean => {
+  const expiry = getTokenExpiry()
+  if (!expiry) return false
+  // 提前 5 分钟判定为"即将过期"
+  return Date.now() >= expiry - 5 * 60 * 1000
+}
+
 export const clearAccessToken = (): void => {
   localStorage.removeItem(authTokenStorageKey)
+  localStorage.removeItem(authTokenExpiryKey)
   // 清除 token 时同步重置 workspace 路由守卫缓存，
   // 防止下次登录（可能是不同用户）复用旧 workspace 状态。
   resetWorkspaceCheck()
@@ -121,4 +138,45 @@ export const handleAuthExpired = (): void => {
   if (typeof window === 'undefined') return
   if (window.location.pathname === '/login') return
   window.location.href = '/login'
+}
+
+// Token 自动刷新：在即将过期前静默刷新，避免用户感知到登录中断。
+// 使用互斥锁防止并发请求重复刷新。
+let isRefreshing = false
+let refreshPromise: Promise<void> | null = null
+
+export const refreshAccessTokenIfNeeded = async (): Promise<void> => {
+  const token = getAccessToken()
+  if (!token) return
+
+  if (!isTokenExpiringSoon()) return
+
+  // 如果已经有刷新请求在进行中，等待它完成
+  if (isRefreshing && refreshPromise) {
+    return refreshPromise
+  }
+
+  isRefreshing = true
+  refreshPromise = (async () => {
+    try {
+      // 调用后端刷新接口（需要后端支持）
+      const response = await requestJson<AuthTokenResponse>('/auth/refresh', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }, 'auth.errors.refresh')
+
+      storeAccessToken(response.accessToken)
+    } catch (error) {
+      // 刷新失败时清除 token 并跳转登录
+      console.warn('[auth] token refresh failed:', error)
+      handleAuthExpired()
+    } finally {
+      isRefreshing = false
+      refreshPromise = null
+    }
+  })()
+
+  return refreshPromise
 }

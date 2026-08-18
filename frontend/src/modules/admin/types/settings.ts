@@ -132,3 +132,7 @@ export type TestEmailTemplateResponse = {
   success: boolean
   message: string
 }
+
+export type SecuritySettings = {
+  securityEntryPath: string
+}

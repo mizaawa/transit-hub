@@ -44,19 +44,56 @@ type Server struct {
 	mux                            *http.ServeMux
 	allowed                        map[string]struct{}
 	authService                    *auth.Service
+	settingsService                settingsServiceInterface
 	leaderboardFrameAncestorOrigin func(ctx context.Context, embedToken string) (string, bool)
 	lotteryFrameAncestorOrigin     func(ctx context.Context, embedToken string) (string, bool)
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
+	securityEntryPathCache         *securityEntryPathCache
+}
+
+type settingsServiceInterface interface {
+	GetFirstSecuritySettings(ctx context.Context) (securitySettings, error)
+}
+
+type securitySettings interface {
+	GetSecurityEntryPath() string
+}
+
+// dynamicSecurityPathProvider 动态从数据库读取安全入口路径
+type dynamicSecurityPathProvider struct {
+	settingsService settingsServiceInterface
+	fallbackCache   *securityEntryPathCache
+}
+
+func (p *dynamicSecurityPathProvider) GetSecurityEntryPath() string {
+	if p.settingsService == nil {
+		if p.fallbackCache != nil {
+			return p.fallbackCache.GetSecurityEntryPath()
+		}
+		return ""
+	}
+	ctx := context.Background()
+	settings, err := p.settingsService.GetFirstSecuritySettings(ctx)
+	if err != nil || settings == nil {
+		if p.fallbackCache != nil {
+			return p.fallbackCache.GetSecurityEntryPath()
+		}
+		return ""
+	}
+	return settings.GetSecurityEntryPath()
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
 	server := &Server{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		allowed: makeAllowedOrigins(cfg.CORSOrigins),
+		cfg:                    cfg,
+		mux:                    http.NewServeMux(),
+		allowed:                makeAllowedOrigins(cfg.CORSOrigins),
+		securityEntryPathCache: &securityEntryPathCache{},
 	}
 
+	// 初始化健康检查模块，注入依赖检查能力
+	health.Initialize(db, redisClient)
 	health.RegisterRoutes(server.mux)
 	authService := auth.NewService(auth.NewRepository(db))
 	server.authService = authService
@@ -272,6 +309,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	}
 
 	settings.RegisterRoutes(server.mux, settingsService)
+	// 注入 settings service 到 server，以便动态读取安全入口路径
+	server.settingsService = settingsService
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
 	// 并启动后台协程对临期令牌做自动刷新。
@@ -397,9 +436,17 @@ func (w groupRateSnapshotWriter) SaveSiteSnapshot(ctx context.Context, userID st
 
 func (s *Server) Handler() http.Handler {
 	// 非 /api 路径交给静态文件服务，支持 Vue history 路由回退
-	static := staticHandler(s.cfg.PublicDir)
+	// 传入安全入口路径配置，启用访问限制
+	// 通过 dynamicSecurityPathProvider 让静态处理器能动态读取数据库中的安全入口配置
+	static := staticHandler(s.cfg.PublicDir, s.cfg.SecurityEntryPath, &dynamicSecurityPathProvider{
+		settingsService: s.settingsService,
+		fallbackCache:   s.securityEntryPathCache,
+	})
 
-	return s.logRequests(s.cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 启用全局限流，防止过载
+	rateLimiter := RateLimit(500) // 每秒 500 请求
+
+	return s.logRequests(s.cors(rateLimiter(panicRecovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.setSecurityHeaders(w, r)
 		if !strings.HasPrefix(r.URL.Path, apiPrefix) {
 			static.ServeHTTP(w, r)
@@ -417,7 +464,7 @@ func (s *Server) Handler() http.Handler {
 		// 前端请求层只能把它归为「响应不是合法 JSON」，报一个笼统的错误；
 		// 改写成结构化 message 后，前端可以据状态码区分「接口不存在」并做降级。
 		s.mux.ServeHTTP(newAPIErrorRewriter(w), r)
-	})))
+	})))))
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

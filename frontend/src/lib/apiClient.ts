@@ -3,7 +3,9 @@ import {
   getAccessToken,
   handleAuthExpired,
   isUnauthorizedApiResponse,
+  refreshAccessTokenIfNeeded,
 } from '@/modules/auth/api/auth'
+import { withRetry } from './requestRetry'
 
 /**
  * 所有请求层共用的错误载荷：后端统一返回 { message: i18n key }。
@@ -86,58 +88,64 @@ const declaresJson = (response: Response): boolean => {
  *    而是降级成模块自己的 request key，由调用方 t() 渲染；
  *  - 401 或 message 为未授权 key 时统一走 handleAuthExpired，
  *    即使响应体是 HTML（会话过期后被网关重定向到登录页）也能正确跳转；
- *  - FormData 请求不设置 Content-Type，交给浏览器生成带 boundary 的值。
+ *  - FormData 请求不设置 Content-Type，交给浏览器生成带 boundary 的值；
+ *  - 网络错误自动重试 3 次，提高容错能力。
  */
 export const requestJson = async <T>(
   path: string,
   options: RequestInit,
   errorKeys: ApiErrorKeys,
 ): Promise<T> => {
-  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
+  return withRetry(async () => {
+    // 请求前尝试刷新即将过期的 token，避免请求到一半 token 失效
+    await refreshAccessTokenIfNeeded()
 
-  let response: Response
-  try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-        ...authHeaders(),
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch {
-    throw new Error(errorKeys.network)
-  }
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
 
-  const text = await response.text()
-
-  let payload = {} as T & ApiErrorPayload
-  let parsed = text.trim() === ''
-  if (!parsed && declaresJson(response)) {
+    let response: Response
     try {
-      payload = JSON.parse(text) as T & ApiErrorPayload
-      parsed = true
+      response = await fetch(endpoint(path), {
+        ...options,
+        headers: {
+          Accept: 'application/json',
+          ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+          ...authHeaders(),
+          ...(options.headers ?? {}),
+        },
+      })
     } catch {
-      parsed = false
+      throw new Error(errorKeys.network)
     }
-  }
 
-  if (!response.ok) {
-    // 会话过期的响应有时并非 JSON（例如被网关改写成登录页），
-    // 因此仅凭状态码也要能触发登出跳转。
-    if (isUnauthorizedApiResponse(response.status, payload)) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
+    const text = await response.text()
+
+    let payload = {} as T & ApiErrorPayload
+    let parsed = text.trim() === ''
+    if (!parsed && declaresJson(response)) {
+      try {
+        payload = JSON.parse(text) as T & ApiErrorPayload
+        parsed = true
+      } catch {
+        parsed = false
+      }
     }
-    throw new ApiRequestError(payload.message ?? errorKeys.request, response.status)
-  }
 
-  if (!parsed) {
-    // 2xx 但响应体不是 JSON：几乎总是请求被错误地路由到了前端静态资源
-    // （base URL 配置为空、反向代理规则缺少 /api 转发）。
-    throw new ApiRequestError(errorKeys.request, response.status)
-  }
+    if (!response.ok) {
+      // 会话过期的响应有时并非 JSON（例如被网关改写成登录页），
+      // 因此仅凭状态码也要能触发登出跳转。
+      if (isUnauthorizedApiResponse(response.status, payload)) {
+        handleAuthExpired()
+        throw new Error(authUnauthorizedErrorKey)
+      }
+      throw new ApiRequestError(payload.message ?? errorKeys.request, response.status)
+    }
 
-  return payload
+    if (!parsed) {
+      // 2xx 但响应体不是 JSON：几乎总是请求被错误地路由到了前端静态资源
+      // （base URL 配置为空、反向代理规则缺少 /api 转发）。
+      throw new ApiRequestError(errorKeys.request, response.status)
+    }
+
+    return payload
+  })
 }

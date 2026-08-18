@@ -33,6 +33,10 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("PUT /api/settings/email-templates/{id}", handler.updateEmailTemplate)
 	mux.HandleFunc("DELETE /api/settings/email-templates/{id}", handler.deleteEmailTemplate)
 	mux.HandleFunc("POST /api/settings/email-templates/{id}/test-email", handler.testEmailTemplate)
+	mux.HandleFunc("GET /api/settings/security", handler.getSecurity)
+	mux.HandleFunc("PUT /api/settings/security", handler.saveSecurity)
+	// 公开接口，用于前端路由检查安全入口路径
+	mux.HandleFunc("GET /api/settings/security/public", handler.getSecurityPublic)
 }
 
 func (h *Handler) getStrategy(w http.ResponseWriter, r *http.Request) {
@@ -390,4 +394,56 @@ func writeEmailTemplateError(w http.ResponseWriter, err error) {
 		log.Printf("email template unexpected error: %v", err)
 		httpjson.WriteError(w, http.StatusInternalServerError, "admin.settings.errors.request")
 	}
+}
+
+func (h *Handler) getSecurity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	settings, err := h.service.GetSecuritySettings(r.Context(), userID)
+	if err != nil {
+		if writeWorkspaceError(w, err) {
+			return
+		}
+		log.Printf("get security settings: %v", err)
+		httpjson.WriteError(w, http.StatusInternalServerError, "admin.settings.errors.request")
+		return
+	}
+	httpjson.Write(w, http.StatusOK, settings)
+}
+
+func (h *Handler) saveSecurity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var dto SaveSecuritySettingsInput
+	if err := httpjson.Decode(r, &dto); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	settings, err := h.service.SaveSecuritySettings(r.Context(), userID, dto)
+	if err != nil {
+		if writeWorkspaceError(w, err) {
+			return
+		}
+		log.Printf("save security settings: %v", err)
+		httpjson.WriteError(w, http.StatusInternalServerError, "admin.settings.errors.request")
+		return
+	}
+	httpjson.Write(w, http.StatusOK, settings)
+}
+
+func (h *Handler) getSecurityPublic(w http.ResponseWriter, r *http.Request) {
+	// 公开接口，不需要认证，仅返回安全入口路径用于前端路由判断
+	settings, err := h.service.GetFirstSecuritySettings(r.Context())
+	if err != nil {
+		// 如果没有配置，返回空的安全入口路径
+		httpjson.Write(w, http.StatusOK, map[string]string{"securityEntryPath": ""})
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]string{"securityEntryPath": settings.SecurityEntryPath})
 }

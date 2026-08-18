@@ -2200,7 +2200,8 @@ export default {
         strategy: '自动化与策略',
         channels: '通知与渠道',
         templates: '消息模板',
-        email: '邮件设置'
+        email: '邮件设置',
+        security: '安全设置'
       },
       sections: {
         basic: {
@@ -2329,14 +2330,14 @@ export default {
         delete: '删除',
         test: '发送测试邮件',
         testRecipient: '测试收件人',
-        testRecipientPlaceholder: "name{'@'}example.com",
+        testRecipientPlaceholder: “name{'@'}example.com”,
         unsaved: '有未保存的修改',
         dirtyBeforeTest: '请先保存模板，再发送测试邮件。',
         discardConfirm: '当前模板有未保存的修改，确定要放弃吗？',
-        deleteConfirm: '确定删除模板“{name}”吗？此操作无法撤销。',
+        deleteConfirm: '确定删除模板”{name}”吗？此操作无法撤销。',
         newTemplateName: '自定义模板',
         newTemplateSubject: '请输入邮件主题',
-        newTemplateHtml: '<div style="font-family:Arial,sans-serif;padding:32px"><h1>在这里填写标题</h1><p>在这里编写邮件内容。</p></div>',
+        newTemplateHtml: '<div style=”font-family:Arial,sans-serif;padding:32px”><h1>在这里填写标题</h1><p>在这里编写邮件内容。</p></div>',
         createSuccess: '模板已创建',
         saveSuccess: '模板已保存',
         deleteSuccess: '模板已删除',
@@ -2348,6 +2349,28 @@ export default {
           builtInProtected: '内置模板不能删除，但可以自由编辑。',
           limitReached: '最多可创建 50 个自定义模板。',
           persistence: '邮件模板保存失败，请稍后重试。'
+        }
+      },
+      security: {
+        title: '安全入口',
+        description: '配置登录页面的访问入口，防止未授权访问。',
+        loading: '加载中...',
+        enableSecureEntry: '启用安全入口',
+        enableSecureEntryHelp: '开启后，直接访问域名将无法进入登录页面，必须通过自定义的安全入口路径访问。',
+        entryPath: '安全入口路径',
+        entryPathPlaceholder: '例如：admin-2024',
+        entryPathHelp: '自定义的路径名称，访问时需要在域名后添加此路径。例如设置为 “admin-2024”，则需要访问 “域名/admin-2024” 才能进入登录页面。留空则禁用安全入口功能。',
+        warning: '重要警告',
+        warningDescription: '设置安全入口路径后，您必须通过 “域名/路径” 才能访问登录页面。请务必记住您的安全入口路径，否则将无法登录！建议先在其他浏览器测试后再关闭当前页面。',
+        currentEntry: '当前安全入口',
+        example: '使用示例',
+        exampleEmpty: '• 留空：直接访问 https://yourdomain.com 即可登录',
+        exampleCustom: '• 设置为 “admin-2024”：必须访问 https://yourdomain.com/admin-2024 才能登录',
+        saveSuccess: '安全设置已保存',
+        errors: {
+          invalidPath: '安全入口路径只能包含字母、数字、下划线和连字符。',
+          pathRequired: '启用安全入口时必须设置入口路径。',
+          persistence: '安全设置保存失败，请稍后重试。'
         }
       }
     },

@@ -50,6 +50,7 @@ type Service struct {
 	repository        *Repository
 	accounts          AdminAccountResolver
 	OnStrategyChanged func(StrategySettings)
+	OnSecuritySettingsChanged func(SecuritySettings)
 
 	// smtpRepo 是 SMTP 存储层的窄接口，由 *Repository 结构性满足；测试可注入内存 fake。
 	smtpRepo smtpRepository
@@ -569,4 +570,39 @@ func dingtalkSignedWebhook(webhook string, secret string) (string, error) {
 func feishuSign(timestamp int64, secret string) string {
 	mac := hmac.New(sha256.New, []byte(strconv.FormatInt(timestamp, 10)+"\n"+secret))
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// GetSecuritySettings 获取安全设置
+func (s *Service) GetSecuritySettings(ctx context.Context, userID string) (SecuritySettings, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return SecuritySettings{}, err
+	}
+	return s.repository.GetSecuritySettings(ctx, userID, adminAccountID)
+}
+
+// GetFirstSecuritySettings 获取第一个安全设置（用于公开接口）
+func (s *Service) GetFirstSecuritySettings(ctx context.Context) (SecuritySettings, error) {
+	return s.repository.GetFirstSecuritySettings(ctx)
+}
+
+// SaveSecuritySettings 保存安全设置
+func (s *Service) SaveSecuritySettings(ctx context.Context, userID string, input SaveSecuritySettingsInput) (SecuritySettings, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return SecuritySettings{}, err
+	}
+	settings := SecuritySettings{
+		SecurityEntryPath: strings.TrimSpace(input.SecurityEntryPath),
+	}
+	if err := s.repository.SaveSecuritySettings(ctx, userID, adminAccountID, settings); err != nil {
+		return SecuritySettings{}, err
+	}
+
+	// 触发安全设置变更回调，通知 HTTP 服务器更新缓存
+	if s.OnSecuritySettingsChanged != nil {
+		s.OnSecuritySettingsChanged(settings)
+	}
+
+	return settings, nil
 }

@@ -2201,7 +2201,8 @@ export default {
         strategy: 'Strategy & Automation',
         channels: 'Channels & Alerts',
         templates: 'Message Templates',
-        email: 'Email Settings'
+        email: 'Email Settings',
+        security: 'Security Settings'
       },
       sections: {
         basic: {
@@ -2330,14 +2331,14 @@ export default {
         delete: 'Delete',
         test: 'Send Test Email',
         testRecipient: 'Test Recipient',
-        testRecipientPlaceholder: "name{'@'}example.com",
+        testRecipientPlaceholder: “name{'@'}example.com”,
         unsaved: 'You have unsaved changes',
         dirtyBeforeTest: 'Save the template before sending a test email.',
         discardConfirm: 'This template has unsaved changes. Discard them?',
         deleteConfirm: 'Delete “{name}”? This action cannot be undone.',
         newTemplateName: 'Custom Template',
         newTemplateSubject: 'Enter an email subject',
-        newTemplateHtml: '<div style="font-family:Arial,sans-serif;padding:32px"><h1>Write your headline here</h1><p>Compose your email content here.</p></div>',
+        newTemplateHtml: '<div style=”font-family:Arial,sans-serif;padding:32px”><h1>Write your headline here</h1><p>Compose your email content here.</p></div>',
         createSuccess: 'Template created',
         saveSuccess: 'Template saved',
         deleteSuccess: 'Template deleted',
@@ -2349,6 +2350,28 @@ export default {
           builtInProtected: 'Built-in templates cannot be deleted, but they remain editable.',
           limitReached: 'You can create up to 50 custom templates.',
           persistence: 'Failed to save the email template. Try again later.'
+        }
+      },
+      security: {
+        title: 'Secure Entry',
+        description: 'Configure login page access to prevent unauthorized visits.',
+        loading: 'Loading...',
+        enableSecureEntry: 'Enable Secure Entry',
+        enableSecureEntryHelp: 'When enabled, direct access to the domain will not show the login page. You must visit the custom entry path.',
+        entryPath: 'Secure Entry Path',
+        entryPathPlaceholder: 'e.g., admin-2024',
+        entryPathHelp: 'Custom path name. For example, set “admin-2024” and visit “domain/admin-2024” to access the login page. Leave empty to disable this feature.',
+        warning: 'Important Warning',
+        warningDescription: 'After setting a secure entry path, you must access the login page via “domain/path”. Please remember your path, or you will not be able to log in! Test in another browser before closing this page.',
+        currentEntry: 'Current Secure Entry',
+        example: 'Usage Examples',
+        exampleEmpty: '• Leave empty: Access https://yourdomain.com directly',
+        exampleCustom: '• Set to “admin-2024”: Must visit https://yourdomain.com/admin-2024',
+        saveSuccess: 'Security settings saved',
+        errors: {
+          invalidPath: 'Entry path can only contain letters, numbers, underscores and hyphens.',
+          pathRequired: 'Entry path is required when secure entry is enabled.',
+          persistence: 'Failed to save security settings. Please try again later.'
         }
       }
     },

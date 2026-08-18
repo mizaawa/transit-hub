@@ -1,27 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail } from 'lucide-vue-next'
+import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, Shield } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
 import {
   getNotificationChannelSettings,
+  getSecuritySettings,
   getSmtpSettings,
   getStrategySettings,
   saveNotificationChannelSettings,
+  saveSecuritySettings,
   saveSmtpSettings,
   saveStrategySettings,
   testNotificationChannel,
   testSmtpEmail,
 } from '../api/settings'
-import type { NotificationChannel, NotificationChannelSettings, NotificationTemplateFormat, SmtpSettings, SmtpTlsMode, StrategySettings, TestNotificationChannelPayload } from '../types/settings'
+import type { NotificationChannel, NotificationChannelSettings, NotificationTemplateFormat, SecuritySettings, SmtpSettings, SmtpTlsMode, StrategySettings, TestNotificationChannelPayload } from '../types/settings'
 
 const { t } = useI18n()
 
 // Tab Settings
-const activeTab = ref<'strategy' | 'channels' | 'email'>('strategy')
+const activeTab = ref<'strategy' | 'channels' | 'email' | 'security'>('strategy')
 
 // Save loading states
 const isSavingStrategy = ref(false)
@@ -33,6 +35,13 @@ const isSavingChannels = ref(false)
 const showSuccessChannels = ref(false)
 const isLoadingChannels = ref(false)
 const errorChannels = ref('')
+
+// Security settings state
+const isSavingSecurity = ref(false)
+const showSuccessSecurity = ref(false)
+const isLoadingSecurity = ref(false)
+const errorSecurity = ref('')
+const securityEntryPath = ref('')
 
 // === Tab 1: Strategy ===
 const enableRefreshInterval = ref(false)
@@ -545,7 +554,42 @@ onMounted(async () => {
   await loadChannels()
   void loadStrategy()
   void loadSmtp()
+  void loadSecurity()
 })
+
+async function loadSecurity() {
+  isLoadingSecurity.value = true
+  errorSecurity.value = ''
+  try {
+    const data = await getSecuritySettings()
+    securityEntryPath.value = data.securityEntryPath || ''
+  } catch (err) {
+    console.error('Failed to load security settings:', err)
+    errorSecurity.value = t('admin.settings.errors.loadFailed')
+  } finally {
+    isLoadingSecurity.value = false
+  }
+}
+
+async function saveSecurity() {
+  isSavingSecurity.value = true
+  errorSecurity.value = ''
+  showSuccessSecurity.value = false
+  try {
+    await saveSecuritySettings({
+      securityEntryPath: securityEntryPath.value.trim()
+    })
+    showSuccessSecurity.value = true
+    setTimeout(() => {
+      showSuccessSecurity.value = false
+    }, 2000)
+  } catch (err) {
+    console.error('Failed to save security settings:', err)
+    errorSecurity.value = t('admin.settings.errors.saveFailed')
+  } finally {
+    isSavingSecurity.value = false
+  }
+}
 </script>
 
 <template>
@@ -599,6 +643,22 @@ onMounted(async () => {
           <div class="flex items-center gap-2">
             <Mail class="w-4 h-4" />
             {{ t('admin.settings.tabs.email') }}
+          </div>
+        </button>
+        <button
+          id="settings-tab-security"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === 'security'"
+          aria-controls="settings-panel-security"
+          @click="activeTab = 'security'"
+          class="relative whitespace-nowrap rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:px-6"
+          :class="activeTab === 'security' ? 'text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground hover:bg-surface/50'"
+        >
+          <div v-if="activeTab === 'security'" class="absolute inset-0 -z-10 rounded-md border border-border/50 bg-background shadow-sm"></div>
+          <div class="flex items-center gap-2">
+            <Shield class="w-4 h-4" />
+            {{ t('admin.settings.tabs.security') }}
           </div>
         </button>
       </div>
@@ -1188,6 +1248,68 @@ onMounted(async () => {
           </div>
         </section>
         <EmailTemplatesPanel />
+        </div>
+
+        <!-- ============================================ -->
+        <!-- Security Tab                                 -->
+        <!-- ============================================ -->
+        <div v-else-if="activeTab === 'security'" id="settings-panel-security" class="space-y-6" role="tabpanel" aria-labelledby="settings-tab-security">
+          <section class="rounded-2xl border border-border/50 bg-card shadow-sm overflow-hidden w-full">
+            <div class="p-6 border-b border-border/50 bg-surface/30 flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="p-2 bg-amber-500/10 text-amber-500 rounded-xl">
+                  <Shield class="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 class="text-lg font-semibold text-foreground">{{ t('admin.settings.security.title') }}</h3>
+                  <p class="text-sm text-muted-foreground">{{ t('admin.settings.security.description') }}</p>
+                </div>
+              </div>
+              <Button :disabled="isSavingSecurity || isLoadingSecurity" @click="saveSecurity" class="min-w-[120px]">
+                <Loader2 v-if="isSavingSecurity" class="h-4 w-4 animate-spin mr-2" />
+                <CheckCircle2 v-else-if="showSuccessSecurity" class="h-4 w-4 mr-2 text-green-400" />
+                <Save v-else class="h-4 w-4 mr-2" />
+                {{ showSuccessSecurity ? t('admin.settings.saveSuccess') : (isSavingSecurity ? t('admin.settings.saving') : t('admin.settings.save')) }}
+              </Button>
+            </div>
+            <div class="p-6 space-y-5">
+              <p v-if="isLoadingSecurity" class="text-sm text-muted-foreground">{{ t('admin.settings.security.loading') }}</p>
+              <p v-if="errorSecurity" class="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ t(errorSecurity) }}</p>
+
+              <div class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <div class="flex gap-3">
+                  <AlertTriangle class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                  <div class="space-y-2">
+                    <p class="text-sm font-medium text-foreground">{{ t('admin.settings.security.warning') }}</p>
+                    <p class="text-xs text-muted-foreground">{{ t('admin.settings.security.warningDescription') }}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid gap-4">
+                <div class="grid gap-2">
+                  <label for="security-entry-path" class="text-xs font-medium text-muted-foreground">
+                    {{ t('admin.settings.security.entryPath') }}
+                  </label>
+                  <Input
+                    id="security-entry-path"
+                    v-model="securityEntryPath"
+                    :placeholder="t('admin.settings.security.entryPathPlaceholder')"
+                    class="h-9 text-sm font-mono"
+                  />
+                  <p class="text-xs text-muted-foreground">{{ t('admin.settings.security.entryPathHelp') }}</p>
+                </div>
+
+                <div class="rounded-xl border border-border/50 bg-surface/30 p-4 space-y-2">
+                  <p class="text-xs font-medium text-foreground">{{ t('admin.settings.security.example') }}</p>
+                  <div class="space-y-1">
+                    <p class="text-xs text-muted-foreground font-mono">{{ t('admin.settings.security.exampleEmpty') }}</p>
+                    <p class="text-xs text-muted-foreground font-mono">{{ t('admin.settings.security.exampleCustom') }}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </transition>
     </div>

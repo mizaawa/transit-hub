@@ -180,3 +180,18 @@ type TestEmailTemplateResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 }
+
+// SecuritySettings 包含安全相关的配置项
+type SecuritySettings struct {
+	SecurityEntryPath string `json:"securityEntryPath"`
+}
+
+// GetSecurityEntryPath 实现 securitySettings 接口
+func (s SecuritySettings) GetSecurityEntryPath() string {
+	return s.SecurityEntryPath
+}
+
+// SaveSecuritySettingsInput 是 PUT /api/settings/security 的请求体
+type SaveSecuritySettingsInput struct {
+	SecurityEntryPath string `json:"securityEntryPath"`
+}

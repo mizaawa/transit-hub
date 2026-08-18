@@ -9,6 +9,27 @@ import {
   setWorkspaceChecked,
 } from './lib/workspaceGuard'
 
+// 安全入口路径检查
+let cachedSecurityPath: string | null = null
+
+async function fetchSecurityEntryPath(): Promise<string> {
+  if (cachedSecurityPath !== null) {
+    return cachedSecurityPath
+  }
+  try {
+    const response = await fetch('/api/settings/security/public')
+    if (response.ok) {
+      const data = await response.json()
+      cachedSecurityPath = data.securityEntryPath || ''
+      return cachedSecurityPath
+    }
+  } catch {
+    // 如果获取失败，默认不启用安全入口限制
+  }
+  cachedSecurityPath = ''
+  return ''
+}
+
 const routes = [
   {
     path: '/',
@@ -22,6 +43,24 @@ const routes = [
   {
     path: '/register',
     redirect: '/login'
+  },
+  {
+    path: '/404',
+    name: 'NotFound',
+    component: () => import('./modules/error/NotFoundPage.vue')
+  },
+  {
+    path: '/:securityPath',
+    name: 'SecurityEntry',
+    beforeEnter: async (to) => {
+      const securityPath = await fetchSecurityEntryPath()
+      if (securityPath && to.params.securityPath === securityPath) {
+        sessionStorage.setItem('security_entry_verified', 'true')
+        return { path: '/login', replace: true }
+      }
+      return { path: '/404', replace: true }
+    },
+    component: () => import('./modules/error/NotFoundPage.vue')
   },
   {
     path: '/embed/tickets',
@@ -124,6 +163,18 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+  // 安全入口检查：如果配置了安全入口路径，必须通过该路径访问登录页
+  if (to.path === '/login') {
+    const securityPath = await fetchSecurityEntryPath()
+    if (securityPath) {
+      const hasSecurityEntry = sessionStorage.getItem('security_entry_verified') === 'true'
+      if (!hasSecurityEntry) {
+        // 返回404页面或空白页，避免暴露登录入口
+        return { path: '/404', replace: true }
+      }
+    }
+  }
+
   if (to.matched.some((route) => route.meta.requiresAuth) && !getAccessToken()) {
     return { path: '/login' }
   }

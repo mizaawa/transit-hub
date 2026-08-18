@@ -11,6 +11,7 @@ import type {
   TestSmtpEmailResponse,
   TestEmailTemplatePayload,
   TestEmailTemplateResponse,
+  SecuritySettings,
 } from '../types/settings'
 import { requestJson as sharedRequestJson } from '@/lib/apiClient'
 
@@ -103,5 +104,16 @@ export const testSmtpEmail = async (payload: TestSmtpEmailPayload): Promise<Test
   requestJson<TestSmtpEmailResponse>('/settings/smtp/test-email', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+)
+
+export const getSecuritySettings = async (): Promise<SecuritySettings> => (
+  requestJson<SecuritySettings>('/settings/security')
+)
+
+export const saveSecuritySettings = async (settings: SecuritySettings): Promise<SecuritySettings> => (
+  requestJson<SecuritySettings>('/settings/security', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
   })
 )

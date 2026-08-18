@@ -50,6 +50,10 @@ type Config struct {
 	// SMTP 密码加密密钥：base64 编码的 32 字节 AES-256-GCM key，由 settings 模块解析和校验。
 	// 应用启动时是可选项，缺失不影响启动；这里只原样读取环境变量原值，不做任何解析或校验。
 	SMTPEncryptionKey string
+
+	// 安全入口路径：设置后只有通过 /<SecurityEntryPath> 才能访问登录页，直接访问域名会返回 404。
+	// 为空时禁用此功能，所有路由正常访问。
+	SecurityEntryPath string
 }
 
 func Load() Config {
@@ -85,6 +89,8 @@ func Load() Config {
 		TicketUploadDir: envOrDefault("TICKET_UPLOAD_DIR", "data/ticket-uploads"),
 
 		SMTPEncryptionKey: os.Getenv("SMTP_ENCRYPTION_KEY"),
+
+		SecurityEntryPath: strings.TrimSpace(os.Getenv("SECURITY_ENTRY_PATH")),
 	}
 }
 

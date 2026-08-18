@@ -54,6 +54,11 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
+	// 创建安全设置表
+	if err := r.EnsureSecuritySchema(ctx); err != nil {
+		return err
+	}
+
 	statements := []string{
 		`ALTER TABLE notification_channel_settings ADD COLUMN IF NOT EXISTS admin_account_id text NOT NULL DEFAULT ''`,
 		`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS admin_account_id text NOT NULL DEFAULT ''`,
@@ -75,6 +80,13 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			CONSTRAINT email_templates_name_check CHECK (length(btrim(name)) > 0 AND length(name) <= 120),
 			CONSTRAINT email_templates_subject_check CHECK (length(btrim(subject)) > 0 AND length(subject) <= 255),
 			CONSTRAINT email_templates_html_body_check CHECK (length(btrim(html_body)) > 0 AND octet_length(html_body) <= 102400)
+		)`,
+		`CREATE TABLE IF NOT EXISTS security_settings (
+			user_id text NOT NULL,
+			admin_account_id text NOT NULL DEFAULT '',
+			security_entry_path text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id)
 		)`,
 	}
 	for _, statement := range statements {
@@ -355,4 +367,56 @@ func scanEmailTemplate(scanner emailTemplateScanner) (EmailTemplate, error) {
 	template.CreatedAt = &createdAt
 	template.UpdatedAt = &updatedAt
 	return template, nil
+}
+
+// GetSecuritySettings 获取安全设置（从环境变量或数据库）
+func (r *Repository) GetSecuritySettings(ctx context.Context, userID string, adminAccountID string) (SecuritySettings, error) {
+	settings := SecuritySettings{}
+	row := r.db.QueryRow(ctx, `SELECT security_entry_path FROM security_settings WHERE user_id = $1 AND admin_account_id = $2`, userID, adminAccountID)
+	if err := row.Scan(&settings.SecurityEntryPath); err != nil {
+		if err == pgx.ErrNoRows {
+			return settings, nil
+		}
+		return settings, err
+	}
+	return settings, nil
+}
+
+// GetFirstSecuritySettings 获取第一个安全设置（用于公开接口）
+func (r *Repository) GetFirstSecuritySettings(ctx context.Context) (SecuritySettings, error) {
+	settings := SecuritySettings{}
+	row := r.db.QueryRow(ctx, `SELECT security_entry_path FROM security_settings ORDER BY updated_at DESC LIMIT 1`)
+	if err := row.Scan(&settings.SecurityEntryPath); err != nil {
+		if err == pgx.ErrNoRows {
+			return settings, nil
+		}
+		return settings, err
+	}
+	return settings, nil
+}
+
+// SaveSecuritySettings 保存安全设置
+func (r *Repository) SaveSecuritySettings(ctx context.Context, userID string, adminAccountID string, settings SecuritySettings) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO security_settings (user_id, admin_account_id, security_entry_path, updated_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
+			security_entry_path = EXCLUDED.security_entry_path,
+			updated_at = EXCLUDED.updated_at
+	`, userID, adminAccountID, settings.SecurityEntryPath)
+	return err
+}
+
+// EnsureSecuritySchema 确保 security_settings 表存在
+func (r *Repository) EnsureSecuritySchema(ctx context.Context) error {
+	_, err := r.db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS security_settings (
+			user_id text NOT NULL,
+			admin_account_id text NOT NULL DEFAULT '',
+			security_entry_path text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id)
+		)
+	`)
+	return err
 }

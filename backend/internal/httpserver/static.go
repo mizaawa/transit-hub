@@ -6,11 +6,19 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// SecurityEntryPathProvider 提供动态获取安全入口路径的接口
+type SecurityEntryPathProvider interface {
+	GetSecurityEntryPath() string
+}
 
 // staticHandler 提供前端静态文件服务和 Vue history 路由回退。
 // API 请求（/api/）不经过此 handler，由调用方在路由层分流。
-func staticHandler(publicDir string) http.Handler {
+// securityEntryPath 为空时禁用安全入口功能，所有路由正常访问。
+// provider 不为 nil 时，优先使用数据库中保存的安全入口路径。
+func staticHandler(publicDir string, initialSecurityEntryPath string, provider SecurityEntryPathProvider) http.Handler {
 	fs := http.Dir(publicDir)
 	fileServer := http.FileServer(fs)
 
@@ -34,6 +42,24 @@ func staticHandler(publicDir string) http.Handler {
 			return
 		}
 
+		// 动态获取安全入口路径：优先使用数据库中的配置，回退到启动时的环境变量
+		securityEntryPath := initialSecurityEntryPath
+		if provider != nil {
+			if dbPath := provider.GetSecurityEntryPath(); dbPath != "" {
+				securityEntryPath = dbPath
+			}
+		}
+
+		// 安全入口检查：如果配置了安全入口路径，只允许通过该路径访问
+		if securityEntryPath != "" {
+			normalizedEntry := "/" + strings.Trim(securityEntryPath, "/")
+			// 只有访问安全入口路径或静态资源才放行
+			if cleanPath != normalizedEntry && !strings.HasPrefix(cleanPath, "/assets/") && !strings.HasPrefix(cleanPath, "/favicon.ico") {
+				http.NotFound(w, r)
+				return
+			}
+		}
+
 		// 检查文件是否存在
 		fullPath := filepath.Join(publicDir, filepath.FromSlash(cleanPath))
 		info, err := os.Stat(fullPath)
@@ -50,6 +76,24 @@ func staticHandler(publicDir string) http.Handler {
 		// 文件不存在或是目录，回退到 index.html（Vue history 路由）
 		serveIndex(w, r, publicDir)
 	})
+}
+
+// securityEntryPathCache 提供线程安全的安全入口路径缓存
+type securityEntryPathCache struct {
+	mu   sync.RWMutex
+	path string
+}
+
+func (c *securityEntryPathCache) GetSecurityEntryPath() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.path
+}
+
+func (c *securityEntryPathCache) SetSecurityEntryPath(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.path = path
 }
 
 // serveIndex 返回 SPA 外壳。index.html 必须禁用缓存：它引用的是带 hash 的资源名，
