@@ -2330,7 +2330,7 @@ export default {
         delete: '删除',
         test: '发送测试邮件',
         testRecipient: '测试收件人',
-        testRecipientPlaceholder: “name{'@'}example.com”,
+        testRecipientPlaceholder: 'name@example.com',
         unsaved: '有未保存的修改',
         dirtyBeforeTest: '请先保存模板，再发送测试邮件。',
         discardConfirm: '当前模板有未保存的修改，确定要放弃吗？',

@@ -20,14 +20,14 @@ type response struct {
 }
 
 var (
-	db    *pgxpool.Pool
-	redis *redis.Client
+	db          *pgxpool.Pool
+	redisClient *redis.Client
 )
 
 // Initialize 初始化健康检查所需的依赖。
-func Initialize(database *pgxpool.Pool, redisClient *redis.Client) {
+func Initialize(database *pgxpool.Pool, rdb *redis.Client) {
 	db = database
-	redis = redisClient
+	redisClient = rdb
 }
 
 func RegisterRoutes(mux *http.ServeMux) {
@@ -66,8 +66,8 @@ func detailed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 检查 Redis
-	if redis != nil {
-		if err := redis.Ping(ctx).Err(); err != nil {
+	if redisClient != nil {
+		if err := redisClient.Ping(ctx).Err(); err != nil {
 			deps["redis"] = "unhealthy: " + err.Error()
 			overallStatus = "degraded"
 		} else {

@@ -2331,7 +2331,7 @@ export default {
         delete: 'Delete',
         test: 'Send Test Email',
         testRecipient: 'Test Recipient',
-        testRecipientPlaceholder: “name{'@'}example.com”,
+        testRecipientPlaceholder: "name{'@'}example.com",
         unsaved: 'You have unsaved changes',
         dirtyBeforeTest: 'Save the template before sending a test email.',
         discardConfirm: 'This template has unsaved changes. Discard them?',

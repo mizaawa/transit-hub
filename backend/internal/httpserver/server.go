@@ -53,11 +53,22 @@ type Server struct {
 }
 
 type settingsServiceInterface interface {
-	GetFirstSecuritySettings(ctx context.Context) (securitySettings, error)
+	GetFirstSecuritySettings(ctx context.Context) (SecuritySettingsGetter, error)
 }
 
-type securitySettings interface {
+type SecuritySettingsGetter interface {
 	GetSecurityEntryPath() string
+}
+
+// settingsServiceAdapter 适配器，将 *settings.Service 转换为 settingsServiceInterface
+type settingsServiceAdapter struct {
+	service interface {
+		GetFirstSecuritySettings(ctx context.Context) (settings.SecuritySettings, error)
+	}
+}
+
+func (a *settingsServiceAdapter) GetFirstSecuritySettings(ctx context.Context) (SecuritySettingsGetter, error) {
+	return a.service.GetFirstSecuritySettings(ctx)
 }
 
 // dynamicSecurityPathProvider 动态从数据库读取安全入口路径
@@ -310,7 +321,17 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	settings.RegisterRoutes(server.mux, settingsService)
 	// 注入 settings service 到 server，以便动态读取安全入口路径
-	server.settingsService = settingsService
+	server.settingsService = &settingsServiceAdapter{service: settingsService}
+
+	// 安全设置变更时更新缓存
+	settingsService.OnSecuritySettingsChanged = func(s settings.SecuritySettings) {
+		server.securityEntryPathCache.SetSecurityEntryPath(s.SecurityEntryPath)
+	}
+
+	// 启动时读取已保存的安全设置，初始化缓存
+	if securitySettings, err := settingsService.GetFirstSecuritySettings(context.Background()); err == nil {
+		server.securityEntryPathCache.SetSecurityEntryPath(securitySettings.SecurityEntryPath)
+	}
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
 	// 并启动后台协程对临期令牌做自动刷新。

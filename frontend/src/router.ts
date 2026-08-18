@@ -9,11 +9,12 @@ import {
   setWorkspaceChecked,
 } from './lib/workspaceGuard'
 
-// 安全入口路径检查
-let cachedSecurityPath: string | null = null
+// 安全入口路径检�?
+let cachedSecurityPath: string = ''
+let isCacheFetched = false
 
 async function fetchSecurityEntryPath(): Promise<string> {
-  if (cachedSecurityPath !== null) {
+  if (isCacheFetched) {
     return cachedSecurityPath
   }
   try {
@@ -21,12 +22,14 @@ async function fetchSecurityEntryPath(): Promise<string> {
     if (response.ok) {
       const data = await response.json()
       cachedSecurityPath = data.securityEntryPath || ''
+      isCacheFetched = true
       return cachedSecurityPath
     }
   } catch {
     // 如果获取失败，默认不启用安全入口限制
   }
   cachedSecurityPath = ''
+  isCacheFetched = true
   return ''
 }
 
@@ -52,7 +55,7 @@ const routes = [
   {
     path: '/:securityPath',
     name: 'SecurityEntry',
-    beforeEnter: async (to) => {
+    beforeEnter: async (to: any) => {
       const securityPath = await fetchSecurityEntryPath()
       if (securityPath && to.params.securityPath === securityPath) {
         sessionStorage.setItem('security_entry_verified', 'true')
@@ -162,24 +165,24 @@ export const router = createRouter({
   routes
 })
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to: any) => {
   // 安全入口检查：如果配置了安全入口路径，必须通过该路径访问登录页
   if (to.path === '/login') {
     const securityPath = await fetchSecurityEntryPath()
     if (securityPath) {
       const hasSecurityEntry = sessionStorage.getItem('security_entry_verified') === 'true'
       if (!hasSecurityEntry) {
-        // 返回404页面或空白页，避免暴露登录入口
+        // 返回404页面或空白页，避免暴露登录入�?
         return { path: '/404', replace: true }
       }
     }
   }
 
-  if (to.matched.some((route) => route.meta.requiresAuth) && !getAccessToken()) {
+  if (to.matched.some((route: any) => route.meta.requiresAuth) && !getAccessToken()) {
     return { path: '/login' }
   }
 
-  if (to.matched.some((route) => route.meta.requiresWorkspace)) {
+  if (to.matched.some((route: any) => route.meta.requiresWorkspace)) {
     if (!isWorkspaceChecked()) {
       try {
         await getCurrentAdminAccount()
@@ -197,3 +200,5 @@ router.beforeEach(async (to) => {
 })
 
 export { resetWorkspaceCheck, markWorkspaceActive }
+
+
