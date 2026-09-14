@@ -27,8 +27,9 @@ services:
       redis:
         condition: service_healthy
     ports:
-      # 左侧 5478 是宿主机访问端口，可按需修改；右侧 5478 是容器内服务端口。
-      - "5478:5478"
+      # 左侧是宿主机访问端口，可通过 TRANSITHUB_HOST_PORT 覆盖；
+      # 右侧 5478 是容器内服务端口，不能改成宿主机端口。
+      - "${TRANSITHUB_HOST_PORT:-5478}:5478"
     environment:
       PORT: "5478"
       # PostgreSQL 连接串。这里的密码必须和 postgres.POSTGRES_PASSWORD 保持一致。

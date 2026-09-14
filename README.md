@@ -70,6 +70,12 @@ docker build -f deploy/Dockerfile -t transithub:local .
 docker compose -f deploy/docker-compose.prod.yml up -d
 ```
 
+如果宿主机的 `5478` 已被其他服务占用，可只更换宿主机端口（容器内端口仍保持 `5478`）：
+
+```bash
+TRANSITHUB_HOST_PORT=8080 docker compose -f deploy/docker-compose.prod.yml up -d
+```
+
 访问地址（默认端口 `5478`）：
 
 ```text
@@ -159,10 +165,16 @@ DATABASE_URL='postgres://postgres:postgres@localhost:5432/transithub?sslmode=dis
 ```yaml
 # deploy/docker-compose.prod.yml
 ports:
-  # 左侧是宿主机端口，可任意修改；右侧必须与 PORT 环境变量一致
-  - "8080:5478"
+  # 左侧是宿主机端口；右侧必须保持 5478
+  - "${TRANSITHUB_HOST_PORT:-5478}:5478"
 environment:
   PORT: "5478"
+```
+
+也可以在启动时临时指定宿主机端口：
+
+```bash
+TRANSITHUB_HOST_PORT=8080 docker compose -f deploy/docker-compose.prod.yml up -d
 ```
 
 ### 持久化数据
