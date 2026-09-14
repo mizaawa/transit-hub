@@ -61,6 +61,29 @@ func (f fakeAdminGroupKeyReader) ListUpstreamKeys(ctx context.Context, userID st
 	return f.keysBySite[siteID], nil
 }
 
+// workspaceAwareKeyReader exposes both APIs so the test can verify that the
+// explicit workspace method wins over the legacy current-workspace method.
+type workspaceAwareKeyReader struct {
+	fakeMySitesReader
+	keysBySite      map[string][]upstream.Sub2APIKeyItem
+	workspaceCalls  *[]string
+	legacyCallCount *int
+}
+
+func (f workspaceAwareKeyReader) ListUpstreamKeys(ctx context.Context, userID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
+	if f.legacyCallCount != nil {
+		*f.legacyCallCount++
+	}
+	return f.keysBySite[siteID], nil
+}
+
+func (f workspaceAwareKeyReader) ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
+	if f.workspaceCalls != nil {
+		*f.workspaceCalls = append(*f.workspaceCalls, userID+"|"+adminAccountID+"|"+siteID)
+	}
+	return f.keysBySite[siteID], nil
+}
+
 // probePolicy 返回一条启用策略，含一个启用的 gpt-4o 模型目标，供候选模型/可探活判断使用。
 func probePolicy() Policy {
 	return Policy{
@@ -221,11 +244,60 @@ func TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier(t *testing.T) {
 	if *linked.UpstreamKeyGroupMultiplier == forwardingAccountMultiplier {
 		t.Fatalf("must not use forwarding account rate_multiplier")
 	}
+	if linked.AccountMultiplier == nil || *linked.AccountMultiplier != upstreamKeyGroupMultiplier {
+		t.Fatalf("linked account multiplier = %v, want upstream key group multiplier %v", linked.AccountMultiplier, upstreamKeyGroupMultiplier)
+	}
 	if unlinked := accountsByID["200"]; unlinked.UpstreamKeyGroupMultiplier != nil || unlinked.UpstreamKeyGroupName != "" {
 		t.Fatalf("unlinked account must keep upstream API key group unknown, got %+v", unlinked)
 	}
+	if unlinked := accountsByID["200"]; unlinked.AccountMultiplier != nil {
+		t.Fatalf("unlinked account must not use its own rate_multiplier as account multiplier, got %v", *unlinked.AccountMultiplier)
+	}
 	if ambiguous := accountsByID["300"]; ambiguous.UpstreamKeyGroupMultiplier != nil || ambiguous.UpstreamKeyGroupName != "" {
 		t.Fatalf("account with an unresolved second connection must keep upstream API key group unknown, got %+v", ambiguous)
+	}
+	if ambiguous := accountsByID["300"]; ambiguous.AccountMultiplier != nil {
+		t.Fatalf("ambiguous account must not use its own rate_multiplier as account multiplier, got %v", *ambiguous.AccountMultiplier)
+	}
+}
+
+func TestUpstreamKeyGroupsPreferExplicitWorkspaceReader(t *testing.T) {
+	workspaceCalls := []string{}
+	legacyCalls := 0
+	multiplier := 0.37
+	mySites := workspaceAwareKeyReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{{
+			UserID:                  "user1",
+			WorkspaceAdminAccountID: "ws-other",
+			UpstreamSiteID:          "site-1",
+			UpstreamKeyID:           "key-1",
+			AdminAccountID:          "account-1",
+			AdminPlatform:           string(upstream.PlatformSub2API),
+		}}},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+		},
+		workspaceCalls:  &workspaceCalls,
+		legacyCallCount: &legacyCalls,
+	}
+	service := &Service{
+		mySites: mySites,
+		sites: fakeSiteLookup{site: &upstream.Site{
+			ID: "site-1", UserID: "user1", AdminAccountID: "ws-other",
+			Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "group-1", Name: "vip", Multiplier: &multiplier}}},
+		}},
+	}
+
+	groups := service.upstreamKeyGroupsByAdminAccount(context.Background(), "user1", "ws-other", string(upstream.PlatformSub2API))
+	got, ok := groups["account-1"]
+	if !ok || got.multiplier == nil || *got.multiplier != multiplier {
+		t.Fatalf("expected explicit workspace key multiplier, got %+v", groups)
+	}
+	if len(workspaceCalls) != 1 || workspaceCalls[0] != "user1|ws-other|site-1" {
+		t.Fatalf("unexpected explicit reader calls: %+v", workspaceCalls)
+	}
+	if legacyCalls != 0 {
+		t.Fatalf("legacy current-workspace reader must not be called when explicit reader exists: %d", legacyCalls)
 	}
 }
 
@@ -625,5 +697,5 @@ func TestHasEnabledProbePolicyExcludesMultiplierOnly(t *testing.T) {
 	}
 }
 
-// 确保 fakeMySitesReader 仍满足 MySitesReader（含 ListRealConnectionsForWorkspace）。
+// 确保 fakeMySitesReader 仍满足基础 MySitesReader；工作区读取能力通过可选接口提供。
 var _ MySitesReader = fakeMySitesReader{}

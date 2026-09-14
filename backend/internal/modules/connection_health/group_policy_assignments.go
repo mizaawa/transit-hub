@@ -30,6 +30,7 @@ type AdminGroupPolicyConfigurationInput struct {
 // targetId；分组名、平台和账号集合一律以后端读取结果为准，避免跨 workspace/分组注入。
 type adminGroupContext struct {
 	adminAccountID string
+	platform       string
 	group          upstream.AdminGroupInfo
 	targetIDs      map[string]struct{}
 }
@@ -62,7 +63,7 @@ func (s *Service) resolveAdminGroupContext(ctx context.Context, userID string, a
 		for _, account := range accounts {
 			targetIDs[buildTargetID(string(session.Platform), adminAccountID, account.ID)] = struct{}{}
 		}
-		return adminGroupContext{adminAccountID: adminAccountID, group: group, targetIDs: targetIDs}, nil
+		return adminGroupContext{adminAccountID: adminAccountID, platform: string(session.Platform), group: group, targetIDs: targetIDs}, nil
 	}
 	return adminGroupContext{}, requestError(ErrorNotFound)
 }
@@ -125,11 +126,6 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 	if err != nil {
 		return AdminGroupPolicyConfiguration{}, err
 	}
-	if groupContext.group.Multiplier == nil && groupConfigurationUsesMultiplier(policyIDs, input.QuickPolicy, responsePolicies) {
-		// 倍率为空时拒绝启用倍率策略，避免旧客户端绕过前端提示后创建一个看似生效、实际
-		// 无法安全计算的配置。解除倍率策略绑定仍然允许，便于用户从错误配置中退出。
-		return AdminGroupPolicyConfiguration{}, requestError(ErrorMultiplierRequired)
-	}
 	activeTargetIDs := make(map[string]struct{}, len(groupContext.targetIDs))
 	excludedSet := make(map[string]struct{}, len(excludedTargetIDs))
 	for _, targetID := range excludedTargetIDs {
@@ -138,6 +134,21 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 	for targetID := range groupContext.targetIDs {
 		if _, excluded := excludedSet[targetID]; !excluded {
 			activeTargetIDs[targetID] = struct{}{}
+		}
+	}
+	if !validAccountMultiplierPointer(groupContext.group.Multiplier) && groupConfigurationUsesMultiplier(policyIDs, input.QuickPolicy, responsePolicies) {
+		// A multiplier policy is safe for a group without a group-level value when
+		// every active target has either a manual account override or a resolved
+		// upstream API-key group value. This keeps the invariant that no target is
+		// silently assigned a guessed 1x multiplier.
+		hasSources, sourceErr := s.groupTargetsHaveMultiplierSources(ctx, userID, groupContext.adminAccountID, groupContext.platform, activeTargetIDs)
+		if sourceErr != nil {
+			return AdminGroupPolicyConfiguration{}, sourceErr
+		}
+		if !hasSources {
+			// 倍率为空且目标没有任何账号级/上游来源时拒绝启用倍率策略，避免
+			// 旧客户端绕过前端提示后创建一个实际无法计算的配置。
+			return AdminGroupPolicyConfiguration{}, requestError(ErrorMultiplierRequired)
 		}
 	}
 

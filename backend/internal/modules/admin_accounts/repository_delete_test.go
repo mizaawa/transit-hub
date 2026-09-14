@@ -22,6 +22,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"connection_health_target_action_states",
 		"connection_health_probe_budget_usage",
 		"connection_health_priority_sync_states",
+		"connection_health_account_multipliers",
 		"connection_health_group_target_exclusions",
 		"connection_health_group_policy_assignments",
 		"connection_health_policy_assignments",

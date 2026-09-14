@@ -14,7 +14,7 @@ const { t, locale } = useI18n()
 
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
+const { sites: upstreamSites, isLoading: isLoadingSites, loadErrorKey, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite, loadSites } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const editingSiteId = ref<string | null>(null)
@@ -321,7 +321,21 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Cards Grid -->
-    <div v-if="viewMode === 'card'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6">
+    <div v-if="isLoadingSites" class="flex min-h-[20rem] flex-col items-center justify-center gap-3 rounded-2xl border border-border/60 bg-card text-sm text-muted-foreground shadow-sm" role="status" aria-live="polite">
+      <Loader2 class="h-7 w-7 animate-spin text-primary" />
+      <span>{{ t('admin.upstream.loading') }}</span>
+    </div>
+
+    <div v-else-if="loadErrorKey" class="flex min-h-[20rem] flex-col items-center justify-center gap-3 rounded-2xl border border-warning/30 bg-warning/5 px-6 text-center" role="alert">
+      <AlertCircle class="h-7 w-7 text-warning" />
+      <p class="text-sm text-muted-foreground">{{ t(loadErrorKey) }}</p>
+      <Button variant="secondary" class="gap-2" @click="loadSites">
+        <RefreshCw class="h-4 w-4" />
+        {{ t('admin.upstream.retry') }}
+      </Button>
+    </div>
+
+    <div v-else-if="viewMode === 'card'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6">
       <div
         v-for="site in filteredSites"
         :key="site.id"
@@ -478,7 +492,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Table (List) View -->
-    <div v-if="viewMode === 'list'" class="rounded-2xl border border-border/60 bg-card overflow-hidden shadow-sm">
+    <div v-else-if="viewMode === 'list'" class="rounded-2xl border border-border/60 bg-card overflow-hidden shadow-sm">
       <div class="overflow-x-auto">
         <table class="w-full text-sm text-left">
           <thead class="bg-surface/50 text-muted-foreground border-b border-border/40">
@@ -625,7 +639,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Empty State -->
-    <div v-if="filteredSites.length === 0" class="flex flex-col items-center justify-center py-12 text-center border border-dashed border-border/60 rounded-2xl bg-surface/30">
+    <div v-if="!isLoadingSites && !loadErrorKey && filteredSites.length === 0" class="flex flex-col items-center justify-center py-12 text-center border border-dashed border-border/60 rounded-2xl bg-surface/30">
       <div class="w-12 h-12 rounded-full bg-muted/50 flex items-center justify-center mb-4">
         <Search class="w-6 h-6 text-muted-foreground" />
       </div>

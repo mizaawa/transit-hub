@@ -31,6 +31,70 @@ const resolveApiBaseUrl = (): string => {
 
 export const apiBaseUrl = resolveApiBaseUrl()
 
+// A request that never produces a response must not leave an admin view in a
+// permanent loading state.  The timeout is applied per retry attempt below.
+export const DEFAULT_API_REQUEST_TIMEOUT_MS = 30_000
+
+interface RequestSignal {
+  signal: AbortSignal
+  cleanup: () => void
+}
+
+/** Combine a caller cancellation signal with the default request deadline. */
+const createRequestSignal = (
+  callerSignal: AbortSignal | null | undefined,
+  timeoutMs = DEFAULT_API_REQUEST_TIMEOUT_MS,
+): RequestSignal => {
+  const controller = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let removeCallerListener: (() => void) | undefined
+
+  const abortFromCaller = () => controller.abort(callerSignal?.reason)
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort(callerSignal.reason)
+    } else {
+      callerSignal.addEventListener('abort', abortFromCaller, { once: true })
+      removeCallerListener = () => callerSignal.removeEventListener('abort', abortFromCaller)
+    }
+  }
+
+  timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeoutId !== undefined) clearTimeout(timeoutId)
+      removeCallerListener?.()
+    },
+  }
+}
+
+const isAbortError = (error: unknown): boolean => (
+  error instanceof Error && error.name === 'AbortError'
+)
+
+const normalizedAbortError = (networkErrorKey: string, cause: unknown): Error => {
+  const error = new Error(networkErrorKey)
+  // requestRetry deliberately does not retry caller cancellation or a timeout.
+  error.name = 'AbortError'
+  ;(error as Error & { cause?: unknown }).cause = cause
+  return error
+}
+
+const waitForAbort = (signal: AbortSignal, networkErrorKey: string): { promise: Promise<never>; cleanup: () => void } => {
+  let onAbort: () => void = () => undefined
+  const promise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(normalizedAbortError(networkErrorKey, signal.reason))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  return {
+    promise,
+    cleanup: () => signal.removeEventListener('abort', onAbort),
+  }
+}
+
 /** 拼接完整请求地址，去掉 base 末尾多余的斜杠。 */
 export const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
 
@@ -93,59 +157,92 @@ const declaresJson = (response: Response): boolean => {
  */
 export const requestJson = async <T>(
   path: string,
-  options: RequestInit,
+  options: RequestInit = {},
   errorKeys: ApiErrorKeys,
 ): Promise<T> => {
   return withRetry(async () => {
-    // 请求前尝试刷新即将过期的 token，避免请求到一半 token 失效
-    await refreshAccessTokenIfNeeded()
-
-    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
-
-    let response: Response
+    const requestSignal = createRequestSignal(options.signal)
+    const abortWait = waitForAbort(requestSignal.signal, errorKeys.network)
     try {
-      response = await fetch(endpoint(path), {
-        ...options,
-        headers: {
-          Accept: 'application/json',
-          ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-          ...authHeaders(),
-          ...(options.headers ?? {}),
-        },
-      })
-    } catch {
-      throw new Error(errorKeys.network)
-    }
+      if (requestSignal.signal.aborted) {
+        throw normalizedAbortError(errorKeys.network, requestSignal.signal.reason)
+      }
 
-    const text = await response.text()
+      // 请求前尝试刷新即将过期的 token，避免请求到一半 token 失效。
+      // The internal signal still bounds the fetch/body read below.
+      await Promise.race([refreshAccessTokenIfNeeded(), abortWait.promise])
+      if (requestSignal.signal.aborted) {
+        throw normalizedAbortError(errorKeys.network, requestSignal.signal.reason)
+      }
 
-    let payload = {} as T & ApiErrorPayload
-    let parsed = text.trim() === ''
-    if (!parsed && declaresJson(response)) {
+      const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
+
+      let response: Response
       try {
-        payload = JSON.parse(text) as T & ApiErrorPayload
-        parsed = true
-      } catch {
-        parsed = false
+        response = await Promise.race([
+          fetch(endpoint(path), {
+            ...options,
+            signal: requestSignal.signal,
+            headers: {
+              Accept: 'application/json',
+              ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+              ...authHeaders(),
+              ...(options.headers ?? {}),
+            },
+          }),
+          abortWait.promise,
+        ])
+      } catch (error) {
+        if (requestSignal.signal.aborted || isAbortError(error)) {
+          throw normalizedAbortError(errorKeys.network, error)
+        }
+        throw new Error(errorKeys.network)
       }
-    }
 
-    if (!response.ok) {
-      // 会话过期的响应有时并非 JSON（例如被网关改写成登录页），
-      // 因此仅凭状态码也要能触发登出跳转。
-      if (isUnauthorizedApiResponse(response.status, payload)) {
-        handleAuthExpired()
-        throw new Error(authUnauthorizedErrorKey)
+      let text: string
+      try {
+        // Some Response implementations do not reject text() when the
+        // underlying signal is aborted. Race the body read explicitly so a
+        // stalled proxy/body cannot leave callers loading forever.
+        text = await Promise.race([response.text(), abortWait.promise])
+      } catch (error) {
+        if (requestSignal.signal.aborted || isAbortError(error)) {
+          throw normalizedAbortError(errorKeys.network, error)
+        }
+        throw new Error(errorKeys.network)
       }
-      throw new ApiRequestError(payload.message ?? errorKeys.request, response.status)
-    }
 
-    if (!parsed) {
-      // 2xx 但响应体不是 JSON：几乎总是请求被错误地路由到了前端静态资源
-      // （base URL 配置为空、反向代理规则缺少 /api 转发）。
-      throw new ApiRequestError(errorKeys.request, response.status)
-    }
+      let payload = {} as T & ApiErrorPayload
+      let parsed = text.trim() === ''
+      if (!parsed && declaresJson(response)) {
+        try {
+          payload = JSON.parse(text) as T & ApiErrorPayload
+          parsed = true
+        } catch {
+          parsed = false
+        }
+      }
 
-    return payload
+      if (!response.ok) {
+        // 会话过期的响应有时并非 JSON（例如被网关改写成登录页），
+        // 因此仅凭状态码也要能触发登出跳转。
+        if (isUnauthorizedApiResponse(response.status, payload)) {
+          handleAuthExpired()
+          throw new Error(authUnauthorizedErrorKey)
+        }
+        throw new ApiRequestError(payload.message ?? errorKeys.request, response.status)
+      }
+
+      if (!parsed) {
+        // 2xx 但响应体不是 JSON：几乎总是请求被错误地路由到了前端静态资源
+        // （base URL 配置为空、反向代理规则缺少 /api 转发）。
+        throw new ApiRequestError(errorKeys.request, response.status)
+      }
+
+      return payload
+    } finally {
+      abortWait.cleanup()
+      requestSignal.cleanup()
+    }
   })
 }

@@ -118,6 +118,7 @@ export default {
       userProfile: '用户资料',
       switchWorkspace: '切换工作区',
       skipToContent: '跳转到主要内容',
+      loading: '正在切换页面...',
       openNavigation: '打开导航',
       closeNavigation: '关闭导航'
     },
@@ -127,6 +128,7 @@ export default {
       lottery: '抽奖活动',
       upstream: '上游管理',
       groupManagement: '分组管理',
+      groupMonitoring: '分组监控',
       groupRates: '分组倍率',
       groupAssociations: '调价映射',
       connectionHealth: '分组健康',
@@ -954,9 +956,20 @@ export default {
           multiplier: '有效倍率',
           strategyMultiplier: '我的分组倍率',
           upstreamMultiplier: '上游 API Key 倍率',
+          accountMultiplier: '账号倍率',
           actions: '操作'
         },
         upstreamMultiplierPending: '关联后展示倍率',
+        multiplierEditor: {
+          edit: '编辑账号倍率',
+          input: '账号倍率',
+          save: '保存账号倍率',
+          cancel: '取消编辑',
+          clear: '恢复自动倍率',
+          manual: '手动',
+          invalid: '请输入大于或等于 0 的有效倍率。',
+          saveFailed: '账号倍率保存失败，请稍后重试。'
+        },
         models: {
           empty: '该目标还没有模型探活结果。',
           latency: '延迟 {value} ms',
@@ -1019,8 +1032,8 @@ export default {
           remoteActionHelp: '故障和恢复时按平台能力自动禁用或恢复目标',
           multiplierOnlyTitle: '仅同步倍率优先级',
           multiplierOnlyHelp: '后台约每 30 秒读取一次最新分组倍率；倍率越低，优先级越高。此模式不需要模型或上游探活凭据。',
-          multiplierMissingTitle: '当前分组没有有效倍率',
-          multiplierMissingHelp: '请先在上游设置该分组倍率后再启用倍率排序。系统不会用 1x 兜底，也不会修改当前优先级。'
+          multiplierMissingTitle: '选中账号没有有效倍率来源',
+          multiplierMissingHelp: '请为每个选中账号设置账号倍率，或在上游配置分组/API Key 倍率后再启用倍率排序。系统不会用 1x 兜底，也不会修改当前优先级。'
         },
         confirm: {
           title: '确认分组配置',
@@ -1372,6 +1385,8 @@ export default {
         modelListUnavailable: '无法获取上游模型列表，请稍后重试。',
         modelListInvalid: '上游模型列表响应格式无法识别。',
         multiplierRequired: '当前分组没有有效倍率，请先在上游设置倍率后再启用倍率排序。',
+        accountMultiplierInvalid: '账号倍率必须是大于或等于 0 的有效数字。',
+        accountMultiplierUnsupported: '当前版本暂不支持编辑账号倍率。',
         manualModelsRequired: '请至少选择一个模型再开始测试。',
         policyNotFound: '所选策略不存在或不属于当前工作区。'
       }
@@ -1380,6 +1395,8 @@ export default {
         searchPlaceholder: '搜索站点名称...',
         addSite: '新增站点',
         summary: '已连接 {connected} / {total} 个上游站点',
+        loading: '正在加载上游站点...',
+        retry: '重新加载',
         refresh: {
           action: '刷新数据',
           refreshing: '刷新中...',

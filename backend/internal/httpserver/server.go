@@ -257,9 +257,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	campaignsService.SetAdminAccountResolver(adminAccountsService)
 	group_rate_campaigns.RegisterRoutes(server.mux, campaignsService, adminAccountsService)
 
-	// 分组健康探活模块：数据源为 real_connections（通过 mySitesService 只读接口），
-	// upstreamService 提供站点 base_url/平台类型查询，platformService 提供 new-api 远端降级/恢复能力。
-	// 不新增手动配置的探活目标，也不改变 my_sites/upstream 现有数据语义。
+	// 分组健康探活模块：旧链路接口继续读取 real_connections；新的 admin 分组健康主列表
+	// 直接读取平台分组/账号并叠加独立探活状态与账号倍率。upstreamService 提供站点元数据，
+	// platformService 提供分组/账号读取、凭据解析及远端降级/恢复能力。
 	connHealthService := connection_health.NewService(
 		connection_health.NewRepository(db),
 		mySitesService,

@@ -96,7 +96,10 @@ const openUpstreamKeyUsageToday = () => { upstreamKeyUsageTodayOpen.value = true
 const closeUpstreamKeyUsageToday = () => { upstreamKeyUsageTodayOpen.value = false }
 const openUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value = true }
 const closeUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value = false }
-const openGroupList = () => { void router.push({ name: 'AdminGroupAssociations' }) }
+// Group Health is now the canonical group-management entry point. Keep the
+// dashboard shortcut aligned with the sidebar so users do not land on the
+// retired pricing-mapping page.
+const openGroupList = () => { void router.push({ name: 'AdminConnectionHealth' }) }
 
 const handleMetricCardClick = (key: string) => {
   switch (key) {

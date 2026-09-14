@@ -207,13 +207,35 @@ const effectivePriorityMode = computed<ConnectionHealthPriorityMode>(() =>
   mode.value === 'multiplier' || mode.value === 'multiplierOnly' ? 'multiplier' : 'none',
 )
 const selectedExistingPolicies = computed(() => props.policies.filter((policy) => selectedPolicyIds.value.has(policy.id)))
-const hasGroupMultiplier = computed(() => typeof props.group?.multiplier === 'number' && Number.isFinite(props.group.multiplier))
+const isValidMultiplier = (value: number | null | undefined): boolean => (
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+)
+
+const selectedTargetsHaveMultiplierSource = computed(() => {
+  const group = props.group
+  if (!group) return false
+  // A valid group multiplier covers every target, regardless of which rows are
+  // selected. This is the normal and cheapest path for existing configurations.
+  if (isValidMultiplier(group.multiplier)) return true
+
+  const selectedAccounts = group.accounts.filter((account) => selectedTargetIds.value.has(account.targetId))
+  if (selectedAccounts.length === 0) return false
+  // When the group value is absent, every active target must have an explicit
+  // account override or a resolved upstream API-key group multiplier. Checking
+  // each row mirrors the server-side invariant and avoids a misleading
+  // "configured" state when only one account has a usable source.
+  return selectedAccounts.every((account) => (
+    isValidMultiplier(account.manualAccountMultiplier)
+    || isValidMultiplier(account.accountMultiplier)
+    || isValidMultiplier(account.upstreamKeyGroupMultiplier)
+  ))
+})
 const requiresGroupMultiplier = computed(() => {
   if (mode.value === 'multiplier' || mode.value === 'multiplierOnly') return true
   if (mode.value !== 'existing') return false
   return selectedExistingPolicies.value.some((policy) => policy.enabled && policy.priorityMode === 'multiplier')
 })
-const multiplierMissing = computed(() => requiresGroupMultiplier.value && !hasGroupMultiplier.value)
+const multiplierMissing = computed(() => requiresGroupMultiplier.value && !selectedTargetsHaveMultiplierSource.value)
 
 const toggleTarget = (targetId: string) => {
   const next = new Set(selectedTargetIds.value)

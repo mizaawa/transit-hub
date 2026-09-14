@@ -13,6 +13,11 @@ const defaultOptions: Required<RetryOptions> = {
   maxRetries: 3,
   retryDelay: 1000,
   shouldRetry: (error: unknown) => {
+    // Abort means the caller cancelled the request or the request deadline
+    // fired. Retrying would delay cancellation and can keep a view loading.
+    if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      return false
+    }
     // 只对网络错误重试，不对业务错误重试
     if (error instanceof Error) {
       return error.message.includes('network') || error.message === 'Failed to fetch'

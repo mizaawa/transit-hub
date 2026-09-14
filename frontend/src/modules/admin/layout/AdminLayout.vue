@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Megaphone, ChevronDown, ArrowRightLeft, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -9,6 +9,7 @@ import { clearAccessToken } from '@/modules/auth/api/auth'
 import { getSystemVersion } from '../api/system'
 import type { SystemVersionResponse } from '../api/system'
 import logoUrl from '@/assets/logo.png'
+import { isNavigationLoading } from '@/router'
 
 const route = useRoute()
 const router = useRouter()
@@ -118,7 +119,7 @@ interface MenuChild {
 }
 
 // 菜单项分两种形态：叶子（单一路由入口）和分组（固定顺序的二级菜单集合）。
-// “分组管理”下的三个二级菜单顺序固定：分组倍率 -> 分组关联 -> 分组健康，不随业务改动调整。
+// 分组监控现在直接进入分组健康；倍率和调价映射仍保留路由兼容性，但不再占用侧边栏展开内容。
 type MenuEntry =
   | { type: 'leaf'; name: string; path: string; icon: Component }
   | { type: 'group'; id: string; name: string; icon: Component; children: MenuChild[] }
@@ -126,17 +127,7 @@ type MenuEntry =
 const menuItems = computed<MenuEntry[]>(() => [
   { type: 'leaf', name: t('admin.menu.dashboard'), path: '/admin', icon: LayoutDashboard },
   { type: 'leaf', name: t('admin.menu.upstream'), path: '/admin/upstream', icon: Network },
-  {
-    type: 'group',
-    id: 'group-management',
-    name: t('admin.menu.groupManagement'),
-    icon: FolderTree,
-    children: [
-      { name: t('admin.menu.groupRates'), path: '/admin/group-rates', icon: Percent },
-      { name: t('admin.menu.groupAssociations'), path: '/admin/group-associations', icon: Link2 },
-      { name: t('admin.menu.connectionHealth'), path: '/admin/connection-health', icon: Activity },
-    ],
-  },
+  { type: 'leaf', name: t('admin.menu.groupMonitoring'), path: '/admin/connection-health', icon: Activity },
   { type: 'leaf', name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
   {
     type: 'group',
@@ -180,7 +171,13 @@ const findMenuLabel = (path: string): string | undefined => {
       if (child) return child.name
     }
   }
-  return undefined
+  // Keep bookmarked legacy pages readable while their routes remain available
+  // for compatibility; they are intentionally absent from the sidebar.
+  const legacyLabels: Record<string, string> = {
+    '/admin/group-rates': t('admin.menu.groupRates'),
+    '/admin/group-associations': t('admin.menu.groupAssociations'),
+  }
+  return legacyLabels[path]
 }
 
 const pageTitle = computed(() => (route.path === '/admin' ? t('admin.menu.dashboard') : findMenuLabel(route.path) ?? ''))
@@ -401,6 +398,15 @@ watch(
 
       <!-- Content Area -->
       <main id="admin-main-content" class="flex-1 overflow-auto" :class="isWorkspaceSelectionPage ? '' : 'p-3 sm:p-6'" tabindex="-1">
+        <div
+          v-if="isNavigationLoading"
+          class="pointer-events-none fixed inset-x-0 top-0 z-[80] h-0.5 overflow-hidden bg-primary/20"
+          role="status"
+          aria-live="polite"
+          :aria-label="t('admin.layout.loading')"
+        >
+          <div class="loading-bar h-full w-1/3 bg-primary" />
+        </div>
         <div v-if="!isWorkspaceSelectionPage && noticeKey" class="mb-4 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
           {{ t(noticeKey) }}
         </div>
@@ -435,5 +441,15 @@ watch(
 .dropdown-leave-to {
   opacity: 0;
   transform: translateY(-4px);
+}
+
+@keyframes loading-bar {
+  0% { transform: translateX(-120%); }
+  50% { transform: translateX(160%); }
+  100% { transform: translateX(320%); }
+}
+
+.loading-bar {
+  animation: loading-bar 1.2s ease-in-out infinite;
 }
 </style>

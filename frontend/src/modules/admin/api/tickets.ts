@@ -12,7 +12,12 @@ import {
   handleAuthExpired,
   isUnauthorizedApiResponse,
 } from '@/modules/auth/api/auth'
-import { authHeaders, endpoint, requestJson as sharedRequestJson } from '@/lib/apiClient'
+import {
+  DEFAULT_API_REQUEST_TIMEOUT_MS,
+  authHeaders,
+  endpoint,
+  requestJson as sharedRequestJson,
+} from '@/lib/apiClient'
 
 // 共享请求层负责：空 base URL 回退、非 JSON 响应降级、401 统一登出。
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> =>
@@ -76,20 +81,46 @@ export const getSub2apiUserProfile = async (ticketId: string): Promise<Sub2apiUs
 // 请求头，所以图片必须先用 fetch 取回 blob，再由调用方通过 URL.createObjectURL 转成可以赋给
 // <img src> 的临时地址（并在不再需要时 revokeObjectURL 释放）。
 export const fetchAttachmentBlob = async (id: string): Promise<Blob> => {
+  const controller = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort()
+      reject(new Error('admin.tickets.errors.network'))
+    }, DEFAULT_API_REQUEST_TIMEOUT_MS)
+  })
   let response: Response
   try {
-    response = await fetch(endpoint(`/tickets/attachments/${encodeURIComponent(id)}`), {
-      headers: authHeaders(),
-    })
-  } catch (error) {
+    response = await Promise.race([
+      fetch(endpoint(`/tickets/attachments/${encodeURIComponent(id)}`), {
+        headers: authHeaders(),
+        signal: controller.signal,
+      }),
+      timeoutPromise,
+    ])
+  } catch {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
     throw new Error('admin.tickets.errors.network')
   }
-  if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, {})) {
-      handleAuthExpired()
-      throw new Error(authUnauthorizedErrorKey)
+
+  try {
+    if (!response.ok) {
+      if (isUnauthorizedApiResponse(response.status, {})) {
+        handleAuthExpired()
+        throw new Error(authUnauthorizedErrorKey)
+      }
+      throw new Error('admin.tickets.errors.attachmentLoadFailed')
     }
-    throw new Error('admin.tickets.errors.attachmentLoadFailed')
+    return await Promise.race([response.blob(), timeoutPromise])
+  } catch (error) {
+    if (error instanceof Error && (
+      error.message === authUnauthorizedErrorKey
+      || error.message === 'admin.tickets.errors.attachmentLoadFailed'
+    )) {
+      throw error
+    }
+    throw new Error('admin.tickets.errors.network')
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
   }
-  return response.blob()
 }

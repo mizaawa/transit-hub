@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   Activity,
@@ -10,10 +10,15 @@ import {
   Clock3,
   Eye,
   Gauge,
+  Check,
+  Loader2,
   Radar,
+  Pencil,
+  RotateCcw,
   Settings2,
   ShieldCheck,
   ShieldQuestion,
+  X,
   Zap,
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -21,6 +26,7 @@ import {
   connectionHealthMessageKey,
   connectionHealthStateBadgeClass,
   formatConnectionHealthTime,
+  useConnectionHealth,
 } from '../../composables/useConnectionHealth'
 import type {
   AdminGroupAccount,
@@ -42,10 +48,14 @@ const { t, te } = useI18n()
 const prefix = 'admin.connectionHealth'
 const detailPrefix = `${prefix}.groupDetail`
 const expandedTargetId = ref('')
+const editingMultiplierTargetId = ref('')
+const multiplierInput = ref('')
+const multiplierError = ref('')
+const savingMultiplierTargetId = ref('')
+const { saveAccountMultiplier } = useConnectionHealth()
 
 const monitoredCount = computed(() => props.group.monitoredAccountCount ?? props.group.accounts.filter((account) => account.hasAssignedPolicy).length)
 const lastProbeAt = computed(() => props.group.healthSummary?.lastProbeAt ?? null)
-const isNewAPI = computed(() => props.group.platform.toLowerCase().includes('new'))
 
 const strictDegradedCount = computed(() => Math.max(
   0,
@@ -94,6 +104,83 @@ const toggleModels = (targetId: string) => {
 
 const formatNumber = (value: number | null | undefined): string => value == null ? '-' : String(value)
 const formatMultiplier = (value: number | null | undefined): string => value == null ? '-' : `${value}x`
+
+// Older API responses may not include the merged field yet. During a rolling
+// upgrade, reproduce the old fallback only when the field is truly absent. A
+// deliberate null from the current API means that no automatic source exists
+// and must not resurrect a stale priority-sync snapshot.
+const accountMultiplierForDisplay = (account: AdminGroupAccount): number | null | undefined => {
+  // Manual values are authoritative even if a mixed-version response contains
+  // an older/null merged field alongside the explicit override.
+  if (account.manualAccountMultiplier != null) return account.manualAccountMultiplier
+  if (account.accountMultiplier !== undefined) return account.accountMultiplier
+  return account.effectiveMultiplier
+    ?? props.group.multiplier
+    ?? account.upstreamKeyGroupMultiplier
+}
+
+const hasManualMultiplier = (account: AdminGroupAccount): boolean => (
+  account.hasManualAccountMultiplier ?? (account.manualAccountMultiplier != null)
+)
+
+const multiplierSaveError = (errorKey?: string): string =>
+  errorKey
+    ? readableMessage(errorKey)
+    : t(`${detailPrefix}.multiplierEditor.saveFailed`)
+
+const startMultiplierEdit = (account: AdminGroupAccount) => {
+  if (savingMultiplierTargetId.value) return
+  editingMultiplierTargetId.value = account.targetId
+  const current = account.manualAccountMultiplier ?? accountMultiplierForDisplay(account)
+  multiplierInput.value = current == null ? '' : String(current)
+  multiplierError.value = ''
+}
+
+const cancelMultiplierEdit = () => {
+  editingMultiplierTargetId.value = ''
+  multiplierInput.value = ''
+  multiplierError.value = ''
+}
+
+const saveMultiplier = async (account: AdminGroupAccount) => {
+  if (savingMultiplierTargetId.value || editingMultiplierTargetId.value !== account.targetId) return
+  const raw = multiplierInput.value.trim()
+  const value = Number(raw)
+  if (!raw || !Number.isFinite(value) || value < 0) {
+    multiplierError.value = t(`${detailPrefix}.multiplierEditor.invalid`)
+    return
+  }
+  savingMultiplierTargetId.value = account.targetId
+  multiplierError.value = ''
+  try {
+    const result = await saveAccountMultiplier(account.targetId, value)
+    if (result.ok) cancelMultiplierEdit()
+    else multiplierError.value = multiplierSaveError(result.errorKey)
+  } finally {
+    savingMultiplierTargetId.value = ''
+  }
+}
+
+const clearMultiplier = async (account: AdminGroupAccount) => {
+  if (savingMultiplierTargetId.value || editingMultiplierTargetId.value !== account.targetId) return
+  savingMultiplierTargetId.value = account.targetId
+  multiplierError.value = ''
+  try {
+    const result = await saveAccountMultiplier(account.targetId, null)
+    if (result.ok) cancelMultiplierEdit()
+    else multiplierError.value = multiplierSaveError(result.errorKey)
+  } finally {
+    savingMultiplierTargetId.value = ''
+  }
+}
+
+// The detail component is reused while selecting groups. Reset transient row
+// state so an editor or expanded model from the previous group cannot leak into
+// the newly selected group's table.
+watch(() => props.group.id, () => {
+  expandedTargetId.value = ''
+  cancelMultiplierEdit()
+})
 </script>
 
 <template>
@@ -176,7 +263,7 @@ const formatMultiplier = (value: number | null | undefined): string => value == 
         <p class="mt-3 text-sm text-muted-foreground">{{ t(`${detailPrefix}.empty`) }}</p>
       </div>
       <div v-else class="overflow-x-auto rounded-lg border border-border/60">
-        <table class="w-full min-w-[66rem] text-sm">
+        <table class="w-full min-w-[62rem] text-sm">
           <thead class="bg-surface/60 text-left text-xs text-muted-foreground">
             <tr>
               <th class="w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
@@ -184,8 +271,7 @@ const formatMultiplier = (value: number | null | undefined): string => value == 
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.health`) }}</th>
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.strategy`) }}</th>
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.priority`) }}</th>
-              <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.strategyMultiplier`) }}</th>
-              <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.upstreamMultiplier`) }}</th>
+              <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.accountMultiplier`) }}</th>
               <th class="px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.actions`) }}</th>
             </tr>
           </thead>
@@ -243,15 +329,79 @@ const formatMultiplier = (value: number | null | undefined): string => value == 
                     <ArrowDownUp v-else-if="account.priorityManaged" class="h-3.5 w-3.5 text-primary" />
                   </div>
                 </td>
-                <td class="px-3 py-3 tabular-nums text-muted-foreground">
-                  {{ account.effectiveMultiplier == null ? (group.multiplierDisplay || '-') : `${account.effectiveMultiplier}x` }}
-                </td>
                 <td class="px-3 py-3 tabular-nums text-foreground">
-                  <span v-if="account.upstreamKeyGroupMultiplier == null" class="text-xs text-muted-foreground">
-                    {{ t(`${detailPrefix}.upstreamMultiplierPending`) }}
-                  </span>
-                  <span v-else>{{ formatMultiplier(account.upstreamKeyGroupMultiplier) }}</span>
-                  <span v-if="account.upstreamKeyGroupName" class="mt-0.5 block max-w-32 truncate text-[11px] text-muted-foreground">
+                  <div v-if="editingMultiplierTargetId !== account.targetId" class="flex items-center gap-1.5">
+                    <span :class="hasManualMultiplier(account) ? 'font-semibold text-primary' : ''">
+                      {{ formatMultiplier(accountMultiplierForDisplay(account)) }}
+                    </span>
+                    <span
+                      v-if="hasManualMultiplier(account)"
+                      class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+                    >
+                      {{ t(`${detailPrefix}.multiplierEditor.manual`) }}
+                    </span>
+                    <Tooltip :text="t(`${detailPrefix}.multiplierEditor.edit`)" wide>
+                      <button
+                        type="button"
+                        class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                        :aria-label="t(`${detailPrefix}.multiplierEditor.edit`)"
+                        :disabled="Boolean(savingMultiplierTargetId)"
+                        @click="startMultiplierEdit(account)"
+                      >
+                        <Pencil class="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+                  </div>
+                  <div v-else class="flex min-w-52 flex-wrap items-center gap-1.5">
+                    <input
+                      v-model="multiplierInput"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      class="h-8 w-24 rounded-md border border-border/60 bg-background px-2 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+                      :aria-label="t(`${detailPrefix}.multiplierEditor.input`)"
+                      :disabled="savingMultiplierTargetId === account.targetId"
+                      @keyup.enter="saveMultiplier(account)"
+                      @keyup.escape="cancelMultiplierEdit"
+                    >
+                    <span class="text-xs text-muted-foreground">x</span>
+                    <Tooltip :text="t(`${detailPrefix}.multiplierEditor.save`)" wide>
+                      <button
+                        type="button"
+                        class="rounded-md p-1.5 text-emerald-600 transition-colors hover:bg-emerald-500/10 disabled:opacity-40"
+                        :aria-label="t(`${detailPrefix}.multiplierEditor.save`)"
+                        :disabled="savingMultiplierTargetId === account.targetId"
+                        @click="saveMultiplier(account)"
+                      >
+                        <Loader2 v-if="savingMultiplierTargetId === account.targetId" class="h-4 w-4 animate-spin" />
+                        <Check v-else class="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip v-if="hasManualMultiplier(account)" :text="t(`${detailPrefix}.multiplierEditor.clear`)" wide>
+                      <button
+                        type="button"
+                        class="rounded-md p-1.5 text-amber-600 transition-colors hover:bg-amber-500/10 disabled:opacity-40"
+                        :aria-label="t(`${detailPrefix}.multiplierEditor.clear`)"
+                        :disabled="savingMultiplierTargetId === account.targetId"
+                        @click="clearMultiplier(account)"
+                      >
+                        <RotateCcw class="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip :text="t(`${detailPrefix}.multiplierEditor.cancel`)" wide>
+                      <button
+                        type="button"
+                        class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
+                        :aria-label="t(`${detailPrefix}.multiplierEditor.cancel`)"
+                        :disabled="savingMultiplierTargetId === account.targetId"
+                        @click="cancelMultiplierEdit"
+                      >
+                        <X class="h-4 w-4" />
+                      </button>
+                    </Tooltip>
+                    <span v-if="multiplierError" class="basis-full text-[11px] text-destructive">{{ multiplierError }}</span>
+                  </div>
+                  <span v-if="editingMultiplierTargetId !== account.targetId && account.upstreamKeyGroupName && !hasManualMultiplier(account) && group.multiplier == null" class="mt-0.5 block max-w-32 truncate text-[11px] text-muted-foreground">
                     {{ account.upstreamKeyGroupName }}
                   </span>
                 </td>
@@ -283,7 +433,7 @@ const formatMultiplier = (value: number | null | undefined): string => value == 
                 </td>
               </tr>
               <tr v-if="expandedTargetId === account.targetId" class="border-t border-border/40 bg-surface/25">
-                <td colspan="8" class="px-12 py-4">
+                <td colspan="7" class="px-12 py-4">
                   <div v-if="account.modelHealth.length === 0 && unprobedModels(account).length === 0" class="text-xs text-muted-foreground">{{ t(`${detailPrefix}.models.empty`) }}</div>
                   <div v-else class="grid gap-2 lg:grid-cols-2">
                     <div v-for="model in account.modelHealth" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-3 py-2.5">

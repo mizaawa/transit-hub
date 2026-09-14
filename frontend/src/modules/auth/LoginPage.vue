@@ -28,17 +28,78 @@ const isLoading = ref(false)
 const statusKey = ref<string | null>(null)
 const errorKey = ref<string | null>(null)
 
-const handleLogin = async () => {
+type PasswordCredentialInit = {
+  id: string
+  password: string
+  name?: string
+}
+
+type PasswordCredentialConstructor = new (data: PasswordCredentialInit) => Credential
+
+/**
+ * Vue handles the login request with fetch, so some browsers do not see a
+ * native navigation they can use to offer saving the password.  Store the
+ * credential when the browser exposes the API; the regular autocomplete
+ * attributes below remain the cross-browser fallback.
+ */
+const storeBrowserCredential = async (username: string, secret: string): Promise<void> => {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return
+
+  try {
+    const credentialContainer = navigator.credentials
+    const PasswordCredential = (window as Window & {
+      PasswordCredential?: PasswordCredentialConstructor
+    }).PasswordCredential
+    if (!credentialContainer || !PasswordCredential) return
+
+    const credential = new PasswordCredential({
+      id: username,
+      password: secret,
+      name: username,
+    })
+    await credentialContainer.store(credential)
+  } catch {
+    // Credential storage is an optional browser enhancement. Never block login.
+  }
+}
+
+const formValue = (formData: FormData, name: string, fallback: string): string => {
+  const value = formData.get(name)
+  return typeof value === 'string' ? value : fallback
+}
+
+const handleLogin = async (event: SubmitEvent) => {
+  if (isLoading.value) return
+
+  // Autofill implementations are allowed to update the native control without
+  // dispatching an input event. Read the controls directly so the request uses
+  // the values the user actually submitted.
+  const form = event.currentTarget
+  const formData = typeof HTMLFormElement !== 'undefined' && form instanceof HTMLFormElement
+    ? new FormData(form)
+    : new FormData()
+  const submittedEmail = formValue(
+    formData,
+    'username',
+    formValue(formData, 'email', email.value),
+  ).trim()
+  const submittedPassword = formValue(formData, 'password', password.value)
+
+  email.value = submittedEmail
+  password.value = submittedPassword
   isLoading.value = true
   statusKey.value = null
   errorKey.value = null
 
   try {
     const response = await loginWithEmail({
-      email: email.value,
-      password: password.value,
+      email: submittedEmail,
+      password: submittedPassword,
     })
     storeAccessToken(response.accessToken)
+    // Do not delay navigation if a browser prompts, rejects, or lacks storage
+    // support; the credential request has already been started at this point.
+    void storeBrowserCredential(submittedEmail, submittedPassword)
     statusKey.value = 'auth.login.success'
     await router.push('/admin')
   } catch (error) {
@@ -80,7 +141,15 @@ const handleLogin = async () => {
           <p class="text-sm text-muted-foreground mt-2">{{ t('auth.login.subtitle') }}</p>
         </div>
 
-        <form @submit.prevent="handleLogin" class="space-y-5">
+        <form
+          id="login-form"
+          name="login"
+          method="post"
+          action="/api/auth/login"
+          autocomplete="on"
+          @submit.prevent="handleLogin"
+          class="space-y-5"
+        >
           <div class="space-y-2">
             <label for="login-email" class="text-sm font-medium text-foreground">{{ t('auth.login.email') }}</label>
             <div class="relative">
@@ -88,13 +157,12 @@ const handleLogin = async () => {
               <Input
                 id="login-email"
                 v-model="email"
-                name="email"
+                name="username"
                 type="email"
                 :placeholder="t('auth.login.emailPlaceholder')" 
                 class="pl-10 h-12 bg-surface border-border/50 focus:border-primary"
-                autocomplete="email"
+                autocomplete="username"
                 spellcheck="false"
-                :disabled="isLoading"
                 required
               />
             </div>
@@ -112,7 +180,6 @@ const handleLogin = async () => {
                 :placeholder="t('auth.login.passwordPlaceholder')" 
                 class="pl-10 h-12 bg-surface border-border/50 focus:border-primary"
                 autocomplete="current-password"
-                :disabled="isLoading"
                 required
               />
             </div>

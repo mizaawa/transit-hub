@@ -81,6 +81,14 @@ type AdminGroupAccount struct {
 	// admin 转发账号自身的 rate_multiplier 猜测。
 	UpstreamKeyGroupName       string   `json:"upstreamKeyGroupName,omitempty"`
 	UpstreamKeyGroupMultiplier *float64 `json:"upstreamKeyGroupMultiplier,omitempty"`
+	// AccountMultiplier 是分组健康中统一展示和倍率排序使用的账号/渠道倍率。
+	// 手动覆盖存在时优先使用覆盖值，否则按现有策略/分组/上游信息回退。
+	// Keep the field in the JSON response even when no source is available. A
+	// deliberate null lets the frontend distinguish "unknown now" from an old
+	// response that predates the merged field.
+	AccountMultiplier          *float64 `json:"accountMultiplier"`
+	ManualAccountMultiplier    *float64 `json:"manualAccountMultiplier,omitempty"`
+	HasManualAccountMultiplier bool     `json:"hasManualAccountMultiplier"`
 	// 独立探活字段。
 	TargetID               string        `json:"targetId"`
 	ProbeAvailable         bool          `json:"probeAvailable"`
@@ -184,8 +192,11 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	for _, state := range priorityStates {
 		priorityByTarget[state.TargetID] = state
 	}
-	// 真实上游 API Key 分组倍率仅用于展示，不参与探活或优先级计算。读取失败时降级为空，
-	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
+	// 手动账号倍率是可选的增强能力。旧测试替身/旧存储没有该接口时按空映射处理，
+	// 不影响既有分组健康页面；生产 Repository 会返回当前 workspace 的覆盖值。
+	manualMultipliers := s.accountMultiplierOverrides(ctx, userID, adminAccountID)
+	// 真实上游 API Key 分组倍率用于统一账号倍率展示，并作为 admin 分组没有倍率时的
+	// 优先级 fallback。读取失败时仍降级为空，保证既有分组健康功能不会因此中断。
 	upstreamKeyGroups := s.upstreamKeyGroupsByAdminAccount(ctx, userID, adminAccountID, platform)
 
 	// stateIndex[targetId][modelName] = 独立探活当前健康状态。旧的 real_connection 状态行
@@ -270,6 +281,21 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 				value := priorityState.EffectiveMultiplier
 				effectiveMultiplier = &value
 			}
+			manualMultiplier, hasManualMultiplier := manualMultipliers[targetID]
+			var manualMultiplierValue *float64
+			if hasManualMultiplier {
+				value := manualMultiplier
+				manualMultiplierValue = &value
+			}
+			// The merged account value is based on current sources only. The
+			// priority-sync snapshot is intentionally kept separate: it may be
+			// stale after an override is cleared and must not masquerade as a
+			// current automatic multiplier in the UI.
+			accountMultiplier := resolveAccountMultiplier(
+				manualMultiplierValue,
+				group.Multiplier,
+				upstreamKeyGroup.multiplier,
+			)
 
 			item := AdminGroupAccount{
 				ID:                         acc.ID,
@@ -287,6 +313,9 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 				GroupIDs:                   acc.GroupIDs,
 				UpstreamKeyGroupName:       upstreamKeyGroup.name,
 				UpstreamKeyGroupMultiplier: upstreamKeyGroup.multiplier,
+				AccountMultiplier:          accountMultiplier,
+				ManualAccountMultiplier:    manualMultiplierValue,
+				HasManualAccountMultiplier: hasManualMultiplier,
 				TargetID:                   targetID,
 				ProbeAvailable:             available,
 				ProbeUnavailableReason:     reason,
@@ -361,14 +390,26 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 	if s.mySites == nil || s.sites == nil {
 		return result
 	}
-	keyReader, ok := s.mySites.(UpstreamKeyReader)
-	if !ok {
+	keyReader, hasLegacyReader := s.mySites.(UpstreamKeyReader)
+	workspaceKeyReader, hasWorkspaceReader := s.mySites.(UpstreamKeyWorkspaceReader)
+	if !hasLegacyReader && !hasWorkspaceReader {
 		// 这是向后兼容的可选展示能力。旧注入实现没有 Key 查询能力时保持未知，
 		// 不阻断分组健康、探活和优先级等原有功能。
 		return result
 	}
 
-	connections, err := s.mySites.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+	var connections []my_sites.RealConnection
+	var err error
+	if workspaceReader, ok := s.mySites.(WorkspaceRealConnectionsReader); ok {
+		// The scheduler has no request-scoped current workspace. Production
+		// readers therefore use the explicit workspace method whenever present.
+		connections, err = workspaceReader.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+	} else {
+		// Keep older injected readers source-compatible. Their legacy method may
+		// be current-workspace scoped; the owner fields below still filter any
+		// rows that carry explicit workspace metadata.
+		connections, err = s.mySites.ListRealConnections(ctx, userID)
+	}
 	if err != nil {
 		log.Printf("[connection-health] upstream key group lookup skipped workspace=%s err=%v", adminAccountID, err)
 		return result
@@ -376,6 +417,14 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 
 	connectionsByAccount := make(map[string][]my_sites.RealConnection)
 	for _, connection := range connections {
+		// The production workspace-scoped reader already applies these predicates,
+		// but keep the boundary defensive for alternate readers and legacy rows.
+		if owner := strings.TrimSpace(connection.UserID); owner != "" && owner != userID {
+			continue
+		}
+		if owner := strings.TrimSpace(connection.WorkspaceAdminAccountID); owner != "" && owner != adminAccountID {
+			continue
+		}
 		accountID := strings.TrimSpace(connection.AdminAccountID)
 		siteID := strings.TrimSpace(connection.UpstreamSiteID)
 		if accountID == "" || siteID == "" {
@@ -400,8 +449,10 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 			candidate, candidateOK := s.upstreamKeyGroupForConnection(
 				ctx,
 				userID,
+				adminAccountID,
 				connection,
 				keyReader,
+				workspaceKeyReader,
 				siteCache,
 				missingSites,
 				keysBySite,
@@ -428,8 +479,10 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 func (s *Service) upstreamKeyGroupForConnection(
 	ctx context.Context,
 	userID string,
+	adminAccountID string,
 	connection my_sites.RealConnection,
 	keyReader UpstreamKeyReader,
+	workspaceKeyReader UpstreamKeyWorkspaceReader,
 	siteCache map[string]*upstream.Site,
 	missingSites map[string]struct{},
 	keysBySite map[string][]upstreamKeyMetadata,
@@ -445,7 +498,20 @@ func (s *Service) upstreamKeyGroupForConnection(
 	}
 	keys, cached := keysBySite[siteID]
 	if !cached {
-		items, err := keyReader.ListUpstreamKeys(ctx, userID, siteID)
+		var (
+			items []upstream.Sub2APIKeyItem
+			err   error
+		)
+		// The scheduler scans all workspaces from a process-wide context. Prefer
+		// the explicit workspace method whenever available; falling back to the
+		// legacy current-workspace reader is only for older injected readers.
+		if workspaceKeyReader != nil {
+			items, err = workspaceKeyReader.ListUpstreamKeysForWorkspace(ctx, userID, adminAccountID, siteID)
+		} else if keyReader != nil {
+			items, err = keyReader.ListUpstreamKeys(ctx, userID, siteID)
+		} else {
+			return upstreamKeyGroupInfo{}, false
+		}
 		if err != nil {
 			failedKeySites[siteID] = struct{}{}
 			return upstreamKeyGroupInfo{}, false
@@ -484,6 +550,14 @@ func (s *Service) upstreamKeyGroupForConnection(
 		var err error
 		site, err = s.sites.GetSite(ctx, siteID)
 		if err != nil || site == nil {
+			missingSites[siteID] = struct{}{}
+			return upstreamKeyGroupInfo{}, false
+		}
+		if owner := strings.TrimSpace(site.UserID); owner != "" && owner != userID {
+			missingSites[siteID] = struct{}{}
+			return upstreamKeyGroupInfo{}, false
+		}
+		if owner := strings.TrimSpace(site.AdminAccountID); owner != "" && owner != adminAccountID {
 			missingSites[siteID] = struct{}{}
 			return upstreamKeyGroupInfo{}, false
 		}

@@ -119,6 +119,7 @@ export default {
       userProfile: 'User profile',
       switchWorkspace: 'Switch Workspace',
       skipToContent: 'Skip to main content',
+      loading: 'Loading page...',
       openNavigation: 'Open navigation',
       closeNavigation: 'Close navigation'
     },
@@ -128,6 +129,7 @@ export default {
       lottery: 'Lottery',
       upstream: 'Upstream',
       groupManagement: 'Group Management',
+      groupMonitoring: 'Group Monitoring',
       groupRates: 'Group Rates',
       groupAssociations: 'Pricing Mappings',
       connectionHealth: 'Group Health',
@@ -955,9 +957,20 @@ export default {
           multiplier: 'Effective Multiplier',
           strategyMultiplier: 'My Group Multiplier',
           upstreamMultiplier: 'Upstream API Key Multiplier',
+          accountMultiplier: 'Account Multiplier',
           actions: 'Actions'
         },
         upstreamMultiplierPending: 'Shown after linking',
+        multiplierEditor: {
+          edit: 'Edit account multiplier',
+          input: 'Account multiplier',
+          save: 'Save account multiplier',
+          cancel: 'Cancel editing',
+          clear: 'Restore automatic multiplier',
+          manual: 'Manual',
+          invalid: 'Enter a valid multiplier greater than or equal to 0.',
+          saveFailed: 'Could not save the account multiplier. Try again.'
+        },
         models: {
           empty: 'This target has no model probe results yet.',
           latency: 'Latency {value} ms',
@@ -1020,8 +1033,8 @@ export default {
           remoteActionHelp: 'Automatically disable or restore targets on failure and recovery when the platform supports it',
           multiplierOnlyTitle: 'Sync Multiplier Priority Only',
           multiplierOnlyHelp: 'The scheduler reads current group multipliers about every 30 seconds. Lower multipliers receive higher priority. No models or probe credentials are required.',
-          multiplierMissingTitle: 'This group has no valid multiplier',
-          multiplierMissingHelp: 'Set the group multiplier upstream before enabling multiplier sorting. The system will not assume 1x or change the current priority.'
+          multiplierMissingTitle: 'Selected accounts have no valid multiplier source',
+          multiplierMissingHelp: 'Set an account multiplier for every selected target, or configure a group/API-key multiplier upstream before enabling multiplier sorting. The system will not assume 1x or change the current priority.'
         },
         confirm: {
           title: 'Review Group Configuration',
@@ -1373,6 +1386,8 @@ export default {
         modelListUnavailable: 'Could not fetch the upstream model list. Please try again later.',
         modelListInvalid: 'The upstream model list response format is not recognized.',
         multiplierRequired: 'This group has no valid multiplier. Set it upstream before enabling multiplier sorting.',
+        accountMultiplierInvalid: 'The account multiplier must be a valid number greater than or equal to 0.',
+        accountMultiplierUnsupported: 'Editing account multipliers is not supported by this version.',
         manualModelsRequired: 'Please select at least one model before starting the test.',
         policyNotFound: 'The selected policy does not exist or is not in the current workspace.'
       }
@@ -1381,6 +1396,8 @@ export default {
         searchPlaceholder: 'Search site name...',
         addSite: 'Add Site',
         summary: '{connected} / {total} upstream sites connected',
+        loading: 'Loading upstream sites...',
+        retry: 'Retry',
         refresh: {
           action: 'Refresh Data',
           refreshing: 'Refreshing...',

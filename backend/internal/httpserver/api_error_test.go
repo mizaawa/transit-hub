@@ -94,7 +94,7 @@ func newStaticTestDir(t *testing.T) string {
 // index.html 必须禁用缓存：它引用带 hash 的资源名，
 // 升级后复用旧 index.html 会去请求已不存在的旧资源，导致白屏。
 func TestStaticHandlerDisablesIndexCaching(t *testing.T) {
-	handler := staticHandler(newStaticTestDir(t))
+	handler := staticHandler(newStaticTestDir(t), "", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/dashboard", nil))
 
@@ -107,7 +107,7 @@ func TestStaticHandlerDisablesIndexCaching(t *testing.T) {
 }
 
 func TestStaticHandlerCachesHashedAssets(t *testing.T) {
-	handler := staticHandler(newStaticTestDir(t))
+	handler := staticHandler(newStaticTestDir(t), "", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest("GET", "/assets/app-abc123.js", nil))
 
@@ -122,7 +122,7 @@ func TestStaticHandlerCachesHashedAssets(t *testing.T) {
 // 对未知路径的写方法返回 index.html 会让前端把 HTML 当 JSON 解析，
 // 正是 `Unexpected token '<'` 报错的一个来源；这里必须回 405。
 func TestStaticHandlerRejectsNonReadMethods(t *testing.T) {
-	handler := staticHandler(newStaticTestDir(t))
+	handler := staticHandler(newStaticTestDir(t), "", nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest("POST", "/some/spa/route", nil))
 
@@ -141,7 +141,7 @@ func TestStaticHandlerBlocksPathTraversal(t *testing.T) {
 		t.Fatalf("write secret: %v", err)
 	}
 
-	handler := staticHandler(dir)
+	handler := staticHandler(dir, "", nil)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest("GET", "/", nil)
 	// 绕过 net/http 的自动清理，直接构造带穿越片段的路径。

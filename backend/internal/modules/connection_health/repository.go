@@ -195,6 +195,18 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_status text NOT NULL DEFAULT ''`,
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_weight integer NULL`,
 
+		`CREATE TABLE IF NOT EXISTS connection_health_account_multipliers (
+			user_id text NOT NULL,
+			admin_account_id text NOT NULL DEFAULT '',
+			target_id text NOT NULL,
+			multiplier double precision NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, target_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_account_multiplier_workspace
+			ON connection_health_account_multipliers (user_id, admin_account_id)`,
+
 		`CREATE TABLE IF NOT EXISTS connection_health_probe_budget_usage (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',
@@ -1190,6 +1202,67 @@ func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PriorityS
 		states = append(states, state)
 	}
 	return states, rows.Err()
+}
+
+// ListAccountMultiplierOverrides returns only the current workspace's manual
+// account/channel values. The table stores no credentials and is isolated by both
+// user_id and admin_account_id.
+func (r *Repository) ListAccountMultiplierOverrides(ctx context.Context, userID string, adminAccountID string) ([]AccountMultiplierOverride, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT user_id, admin_account_id, target_id, multiplier, created_at, updated_at
+		FROM connection_health_account_multipliers
+		WHERE user_id = $1 AND admin_account_id = $2
+		ORDER BY updated_at DESC, target_id ASC
+	`, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]AccountMultiplierOverride, 0)
+	for rows.Next() {
+		var row AccountMultiplierOverride
+		if err := rows.Scan(&row.UserID, &row.AdminAccountID, &row.TargetID, &row.Multiplier, &row.CreatedAt, &row.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) GetAccountMultiplierOverride(ctx context.Context, userID string, adminAccountID string, targetID string) (*AccountMultiplierOverride, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT user_id, admin_account_id, target_id, multiplier, created_at, updated_at
+		FROM connection_health_account_multipliers
+		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
+	`, userID, adminAccountID, targetID)
+	var result AccountMultiplierOverride
+	if err := row.Scan(&result.UserID, &result.AdminAccountID, &result.TargetID, &result.Multiplier, &result.CreatedAt, &result.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (r *Repository) UpsertAccountMultiplierOverride(ctx context.Context, override AccountMultiplierOverride) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO connection_health_account_multipliers
+			(user_id, admin_account_id, target_id, multiplier, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,now(),now())
+		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
+			multiplier = EXCLUDED.multiplier,
+			updated_at = now()
+	`, override.UserID, override.AdminAccountID, override.TargetID, override.Multiplier)
+	return err
+}
+
+func (r *Repository) DeleteAccountMultiplierOverride(ctx context.Context, userID string, adminAccountID string, targetID string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM connection_health_account_multipliers
+		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
+	`, userID, adminAccountID, targetID)
+	return err
 }
 
 func (r *Repository) UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error {

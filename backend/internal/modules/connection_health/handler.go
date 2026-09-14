@@ -1,6 +1,8 @@
 package connection_health
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -34,6 +36,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/manual-probe", handler.manualProbeTarget)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/policy-assignments", handler.getPolicyAssignments)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/multiplier", handler.putAccountMultiplier)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/policy-configuration", handler.getAdminGroupPolicyConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/policy-configuration", handler.putAdminGroupPolicyConfiguration)
 }
@@ -361,6 +364,50 @@ func (h *Handler) putPolicyAssignments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := h.service.SetTargetPolicyAssignments(r.Context(), userID, targetID, input.PolicyIDs)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+// AccountMultiplierInput 允许 multiplier 为 null；null 表示清除手动覆盖并恢复自动倍率。
+type AccountMultiplierInput struct {
+	Multiplier *float64 `json:"multiplier"`
+}
+
+// accountMultiplierRequest keeps the distinction between an omitted field and an
+// explicit JSON null. The latter is the documented way to clear an override; an
+// omitted value is almost always a malformed or accidentally empty update.
+type accountMultiplierRequest struct {
+	Multiplier json.RawMessage `json:"multiplier"`
+}
+
+func (h *Handler) putAccountMultiplier(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var wire accountMultiplierRequest
+	if err := httpjson.Decode(r, &wire); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	if len(wire.Multiplier) == 0 {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	var multiplier *float64
+	if !bytes.Equal(bytes.TrimSpace(wire.Multiplier), []byte("null")) {
+		var value float64
+		if err := json.Unmarshal(wire.Multiplier, &value); err != nil {
+			httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+			return
+		}
+		multiplier = &value
+	}
+	result, err := h.service.SetAccountMultiplier(r.Context(), userID, r.PathValue("id"), multiplier)
 	if err != nil {
 		writeError(w, err)
 		return

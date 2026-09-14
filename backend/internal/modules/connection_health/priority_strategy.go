@@ -15,11 +15,12 @@ type TargetPriorityActioner interface {
 }
 
 type priorityTargetInventory struct {
-	target          AdminProbeTarget
-	account         upstream.AdminGroupAccountInfo
-	policies        []Policy
-	multipliers     []float64
-	currentPriority int
+	target           AdminProbeTarget
+	account          upstream.AdminGroupAccountInfo
+	policies         []Policy
+	multipliers      []float64
+	manualMultiplier *float64
+	currentPriority  int
 }
 
 // syncMultiplierPriorities 在每轮探活前同步上游优先级。普通倍率策略仍然「健康优先、倍率次之」，
@@ -79,8 +80,26 @@ func (s *Service) syncMultiplierPrioritiesWithCache(
 			continue
 		}
 		session := inventorySnapshot.session
-		inventory, inventoryComplete, err := s.priorityInventoryForSnapshot(
-			inventorySnapshot, adminAccountID, assignedTargets[workspaceKey], assignedGroups[workspaceKey], excluded[workspaceKey],
+		manualMultipliers, multiplierErr := s.loadAccountMultiplierOverrides(ctx, userID, adminAccountID)
+		if multiplierErr != nil {
+			// An unreadable override set is not equivalent to an empty set: falling
+			// back to group values here could overwrite a manually managed priority.
+			log.Printf("[connection-health] priority sync account multiplier read failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, multiplierErr)
+			continue
+		}
+		// The upstream API-key group is an automatic fallback for targets whose
+		// admin group has no multiplier. Keep this lookup best-effort, matching the
+		// read-only health aggregation; manual values still work when the optional
+		// upstream metadata cannot be resolved.
+		upstreamKeyGroups := s.upstreamKeyGroupsByAdminAccount(ctx, userID, adminAccountID, string(session.Platform))
+		inventory, inventoryComplete, err := s.priorityInventoryForSnapshotWithSources(
+			inventorySnapshot,
+			adminAccountID,
+			assignedTargets[workspaceKey],
+			assignedGroups[workspaceKey],
+			excluded[workspaceKey],
+			manualMultipliers,
+			upstreamKeyGroups,
 		)
 		if err != nil {
 			log.Printf("[connection-health] priority sync inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
@@ -101,6 +120,37 @@ func (s *Service) priorityInventoryForSnapshot(
 	targetPolicies map[string][]Policy,
 	groupPolicies map[string][]Policy,
 	excludedByGroup map[string]map[string]bool,
+) (map[string]*priorityTargetInventory, bool, error) {
+	return s.priorityInventoryForSnapshotWithOverrides(snapshot, adminAccountID, targetPolicies, groupPolicies, excludedByGroup, nil)
+}
+
+func (s *Service) priorityInventoryForSnapshotWithOverrides(
+	snapshot *adminWorkspaceInventory,
+	adminAccountID string,
+	targetPolicies map[string][]Policy,
+	groupPolicies map[string][]Policy,
+	excludedByGroup map[string]map[string]bool,
+	manualMultipliers map[string]float64,
+) (map[string]*priorityTargetInventory, bool, error) {
+	return s.priorityInventoryForSnapshotWithSources(
+		snapshot,
+		adminAccountID,
+		targetPolicies,
+		groupPolicies,
+		excludedByGroup,
+		manualMultipliers,
+		nil,
+	)
+}
+
+func (s *Service) priorityInventoryForSnapshotWithSources(
+	snapshot *adminWorkspaceInventory,
+	adminAccountID string,
+	targetPolicies map[string][]Policy,
+	groupPolicies map[string][]Policy,
+	excludedByGroup map[string]map[string]bool,
+	manualMultipliers map[string]float64,
+	upstreamKeyGroups map[string]upstreamKeyGroupInfo,
 ) (map[string]*priorityTargetInventory, bool, error) {
 	session := snapshot.session
 	platform := string(session.Platform)
@@ -131,6 +181,11 @@ func (s *Service) priorityInventoryForSnapshot(
 				}
 				inventory[targetID] = item
 			}
+			if manualMultiplier := accountMultiplierForTarget(manualMultipliers, targetID); manualMultiplier != nil {
+				// The same target can appear in several groups. Keep one validated manual
+				// value and ignore group-derived values for every occurrence.
+				item.manualMultiplier = manualMultiplier
+			}
 			inherited := groupPolicies[group.ID]
 			excluded := excludedByGroup[group.ID][targetID]
 			if excluded {
@@ -140,11 +195,25 @@ func (s *Service) priorityInventoryForSnapshot(
 			// 或无倍率策略的其它成员分组错误地压低当前目标优先级。
 			explicitMultiplier := hasMultiplierPriorityPolicy(targetPolicies[targetID])
 			inheritedMultiplier := !excluded && hasMultiplierPriorityPolicy(inherited)
-			if group.Multiplier != nil && (explicitMultiplier || inheritedMultiplier) {
+			if item.manualMultiplier == nil && group.Multiplier != nil && (explicitMultiplier || inheritedMultiplier) {
 				item.multipliers = append(item.multipliers, *group.Multiplier)
 			}
 			item.policies = mergePoliciesByID(item.policies, targetPolicies[targetID], inherited)
 		}
+	}
+	// Use the upstream API-key group only when no applicable admin-group value
+	// was collected. This preserves the existing admin-group precedence while
+	// making upstream-only targets sortable and consistent with the merged UI
+	// value.
+	for _, item := range inventory {
+		if item.manualMultiplier != nil || len(item.multipliers) > 0 {
+			continue
+		}
+		upstreamGroup, ok := upstreamKeyGroups[item.account.ID]
+		if !ok || upstreamGroup.multiplier == nil || !validAccountMultiplier(*upstreamGroup.multiplier) {
+			continue
+		}
+		item.multipliers = append(item.multipliers, *upstreamGroup.multiplier)
 	}
 	return inventory, inventoryComplete, nil
 }
@@ -174,7 +243,9 @@ func (s *Service) syncWorkspacePriorities(
 		if !hasMultiplierPriorityPolicy(item.policies) {
 			continue
 		}
-		if len(item.multipliers) == 0 {
+		if item.manualMultiplier != nil {
+			item.multipliers = []float64{*item.manualMultiplier}
+		} else if len(item.multipliers) == 0 {
 			// 分组没有返回倍率时进入等待态：既不猜测 1x，也不把已接管目标恢复成旧优先级。
 			// 保留同步快照后，倍率恢复可见时下一轮会从原状态继续安全同步。
 			missingMultiplier[targetID] = struct{}{}

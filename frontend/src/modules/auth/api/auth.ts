@@ -33,22 +33,81 @@ const apiBaseUrl = resolveApiBaseUrl()
 
 const endpoint = (path: string): string => `${apiBaseUrl.replace(/\/$/, '')}${path}`
 
+const AUTH_REQUEST_TIMEOUT_MS = 15_000
+
+const createAuthRequestSignal = (callerSignal?: AbortSignal | null) => {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS)
+  let removeCallerListener: (() => void) | undefined
+
+  const abortFromCaller = () => controller.abort()
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort()
+    } else {
+      callerSignal.addEventListener('abort', abortFromCaller, { once: true })
+      removeCallerListener = () => callerSignal.removeEventListener('abort', abortFromCaller)
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeoutId)
+      removeCallerListener?.()
+    },
+  }
+}
+
 const requestJson = async <T>(path: string, options: RequestInit = {}, errorKey = 'auth.errors.unknown'): Promise<T> => {
+  const requestSignal = createAuthRequestSignal(options.signal ?? undefined)
+  let removeAbortListener: (() => void) | undefined
+  const abortPromise = new Promise<never>((_, reject) => {
+    const rejectOnAbort = () => {
+      const error = new Error('auth.errors.network')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    if (requestSignal.signal.aborted) {
+      rejectOnAbort()
+    } else {
+      requestSignal.signal.addEventListener('abort', rejectOnAbort, { once: true })
+      removeAbortListener = () => requestSignal.signal.removeEventListener('abort', rejectOnAbort)
+    }
+  })
+  const cleanup = () => {
+    removeAbortListener?.()
+    requestSignal.cleanup()
+  }
   let response: Response
   try {
-    response = await fetch(endpoint(path), {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        ...(options.headers ?? {}),
-      },
-    })
-  } catch (error) {
+    response = await Promise.race([
+      fetch(endpoint(path), {
+        ...options,
+        signal: requestSignal.signal,
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(options.headers ?? {}),
+        },
+      }),
+      abortPromise,
+    ])
+  } catch {
+    cleanup()
     throw new Error('auth.errors.network')
   }
 
-  const text = await response.text()
+  let text: string
+  try {
+    // Explicitly race body consumption as some fetch/Response
+    // implementations do not reject text() when the signal is aborted.
+    text = await Promise.race([response.text(), abortPromise])
+  } catch {
+    cleanup()
+    throw new Error('auth.errors.network')
+  }
+  cleanup()
   const contentType = response.headers.get('Content-Type') ?? ''
   let payload = {} as T & { message?: string }
   let parsed = text.trim() === ''
@@ -141,8 +200,7 @@ export const handleAuthExpired = (): void => {
 }
 
 // Token 自动刷新：在即将过期前静默刷新，避免用户感知到登录中断。
-// 使用互斥锁防止并发请求重复刷新。
-let isRefreshing = false
+// 使用共享 Promise 防止并发请求重复刷新。
 let refreshPromise: Promise<void> | null = null
 
 export const refreshAccessTokenIfNeeded = async (): Promise<void> => {
@@ -151,13 +209,18 @@ export const refreshAccessTokenIfNeeded = async (): Promise<void> => {
 
   if (!isTokenExpiringSoon()) return
 
-  // 如果已经有刷新请求在进行中，等待它完成
-  if (isRefreshing && refreshPromise) {
-    return refreshPromise
-  }
+  // 已有刷新任务时，所有调用方共享同一个 Promise。
+  if (refreshPromise) return refreshPromise
 
-  isRefreshing = true
-  refreshPromise = (async () => {
+  let resolveRefresh!: () => void
+  const pendingRefresh = new Promise<void>((resolve) => {
+    resolveRefresh = resolve
+  })
+  // Publish the lock before starting asynchronous work so every concurrent
+  // request observes the same promise, including during initialization.
+  refreshPromise = pendingRefresh
+
+  void (async () => {
     try {
       // 调用后端刷新接口（需要后端支持）
       const response = await requestJson<AuthTokenResponse>('/auth/refresh', {
@@ -173,10 +236,10 @@ export const refreshAccessTokenIfNeeded = async (): Promise<void> => {
       console.warn('[auth] token refresh failed:', error)
       handleAuthExpired()
     } finally {
-      isRefreshing = false
-      refreshPromise = null
+      resolveRefresh()
+      if (refreshPromise === pendingRefresh) refreshPromise = null
     }
-  })()
+  })().catch(() => undefined)
 
-  return refreshPromise
+  return pendingRefresh
 }

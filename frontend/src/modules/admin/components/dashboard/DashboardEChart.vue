@@ -42,7 +42,12 @@ onMounted(() => {
   resizeObserver.observe(chartElement.value)
 })
 
-watch(() => props.option, render, { deep: true })
+// The parent supplies a freshly-built computed option whenever chart data or
+// theme inputs change. A deep watch traverses ECharts' large option tree on
+// every reactive tick and can trigger needless redraws (or a feedback loop
+// when ECharts normalizes the option object), which makes the admin dashboard
+// appear frozen under refresh. Identity changes are sufficient here.
+watch(() => props.option, render)
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()

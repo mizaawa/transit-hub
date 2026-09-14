@@ -34,6 +34,7 @@ import {
   restoreConnection,
   setTargetPolicyAssignments,
   setAdminGroupPolicyConfiguration,
+  setAccountMultiplier,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
 
@@ -134,15 +135,17 @@ export function useConnectionHealth() {
   }
 
   // loadAdminGroups 载入新的主列表数据源（admin 全量分组）。silent 语义同 loadGroups。
-  const loadAdminGroups = async (opts: { silent?: boolean } = {}) => {
+  const loadAdminGroups = async (opts: { silent?: boolean } = {}): Promise<boolean> => {
     if (!opts.silent) isLoading.value = true
     errorKey.value = ''
     try {
       const nextGroups = await getConnectionHealthAdminGroups()
       adminGroups.value = nextGroups
       overview.value = overviewFromAdminGroups(nextGroups)
+      return true
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      return false
     } finally {
       if (!opts.silent) isLoading.value = false
     }
@@ -320,6 +323,44 @@ export function useConnectionHealth() {
     }
   }
 
+  const saveAccountMultiplier = async (targetId: string, multiplier: number | null): Promise<{ ok: boolean; errorKey?: string }> => {
+    errorKey.value = ''
+    try {
+      const response = await setAccountMultiplier(targetId, multiplier)
+
+      // Apply the mutation response immediately. This keeps the editor honest
+      // even when the follow-up aggregate request is temporarily unavailable.
+      // A clear operation falls back to the current group/key source locally;
+      // the next refresh remains authoritative.
+      adminGroups.value = adminGroups.value.map((group) => ({
+        ...group,
+        accounts: group.accounts.map((account) => {
+          if (account.targetId !== targetId) return account
+          const automaticFallback = multiplier === null
+            ? group.multiplier ?? account.upstreamKeyGroupMultiplier ?? null
+            : null
+          return {
+            ...account,
+            manualAccountMultiplier: response.manualAccountMultiplier,
+            hasManualAccountMultiplier: response.manualAccountMultiplier != null,
+            accountMultiplier: response.accountMultiplier ?? automaticFallback,
+          }
+        }),
+      }))
+      overview.value = overviewFromAdminGroups(adminGroups.value)
+
+      // Keep the selected group and overview in sync without flashing a full-page loader.
+      const refreshed = await loadAdminGroups({ silent: true })
+      if (!refreshed) {
+        return { ok: false, errorKey: errorKey.value || 'admin.connectionHealth.errors.request' }
+      }
+      return { ok: true }
+    } catch (err) {
+      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      return { ok: false, errorKey: errorKey.value }
+    }
+  }
+
   const disable = async (connectionId: string) => {
     isActionLoading.value = true
     errorKey.value = ''
@@ -377,6 +418,7 @@ export function useConnectionHealth() {
     saveTargetPolicyAssignments,
     loadAdminGroupPolicyConfiguration,
     saveAdminGroupPolicyConfiguration,
+    saveAccountMultiplier,
     disable,
     restore,
   }

@@ -44,6 +44,8 @@ const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite
 
 export const useUpstreamSites = () => {
   const sites = ref<UpstreamSite[]>([])
+  const isLoading = ref(true)
+  const loadErrorKey = ref<string | null>(null)
   const isAdding = ref(false)
   const isRefreshing = ref(false)
   const addErrorKey = ref<string | null>(null)
@@ -51,8 +53,16 @@ export const useUpstreamSites = () => {
   const connectedCount = computed(() => sites.value.filter((site) => site.status === 'connected' || site.status === 'syncing').length)
 
   const loadSites = async () => {
-    const remoteSites = await listUpstreamSites()
-    sites.value = remoteSites.map((site, index) => normalizeSite(site, logoClasses[index % logoClasses.length]))
+    isLoading.value = true
+    loadErrorKey.value = null
+    try {
+      const remoteSites = await listUpstreamSites()
+      sites.value = remoteSites.map((site, index) => normalizeSite(site, logoClasses[index % logoClasses.length]))
+    } catch (error) {
+      loadErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.request'
+    } finally {
+      isLoading.value = false
+    }
   }
 
   const addSite = async (form: UpstreamSiteForm): Promise<boolean> => {
@@ -112,6 +122,7 @@ export const useUpstreamSites = () => {
   // 逐站流式同步状态：每个站点 ID 映射到当前同步阶段。
   const siteSyncStates = ref(new Map<string, SiteSyncState>())
   const syncingSiteIds = ref(new Set<string>())
+  let activeStreamController: AbortController | null = null
 
   const refreshSingleSite = async (id: string) => {
     if (syncingSiteIds.value.has(id)) return
@@ -129,6 +140,8 @@ export const useUpstreamSites = () => {
     if (isRefreshing.value) return
     isRefreshing.value = true
     siteSyncStates.value = new Map()
+    const streamController = new AbortController()
+    activeStreamController = streamController
 
     try {
       await streamSyncAllUpstreamSites((event) => {
@@ -164,11 +177,12 @@ export const useUpstreamSites = () => {
             isRefreshing.value = false
             break
         }
-      })
+      }, streamController.signal)
     } catch {
       // 连接中断时清理状态。
     } finally {
       isRefreshing.value = false
+      if (activeStreamController === streamController) activeStreamController = null
     }
   }
 
@@ -180,11 +194,14 @@ export const useUpstreamSites = () => {
   void loadSites()
 
   onBeforeUnmount(() => {
-    // no-op; backend now owns refresh scheduling
+    activeStreamController?.abort()
+    activeStreamController = null
   })
 
   return {
     sites,
+    isLoading,
+    loadErrorKey,
     isAdding,
     isRefreshing,
     addErrorKey,

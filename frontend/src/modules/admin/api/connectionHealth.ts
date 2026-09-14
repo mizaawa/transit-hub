@@ -84,6 +84,17 @@ export const setTargetPolicyAssignments = async (targetId: string, policyIds: st
     body: JSON.stringify({ policyIds }),
   })
 
+export const setAccountMultiplier = async (targetId: string, multiplier: number | null): Promise<{
+  targetId: string
+  multiplier: number | null
+  manualAccountMultiplier: number | null
+  accountMultiplier: number | null
+}> =>
+  requestJson(`/connection-health/targets/${encodeURIComponent(targetId)}/multiplier`, {
+    method: 'PUT',
+    body: JSON.stringify({ multiplier }),
+  })
+
 export const getAdminGroupPolicyConfiguration = async (adminGroupId: string): Promise<AdminGroupPolicyConfiguration> =>
   requestJson<AdminGroupPolicyConfiguration>(
     `/connection-health/admin-groups/${encodeURIComponent(adminGroupId)}/policy-configuration`,

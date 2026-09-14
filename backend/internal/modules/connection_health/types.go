@@ -78,6 +78,10 @@ const (
 	ErrorManualModelsRequired = "admin.connectionHealth.errors.manualModelsRequired"
 	// ErrorPolicyNotFound：分配策略时传入的 policyId 不属于当前 workspace 或不存在。
 	ErrorPolicyNotFound = "admin.connectionHealth.errors.policyNotFound"
+	// ErrorAccountMultiplierInvalid：手动账号/渠道倍率必须是有限的非负数。
+	ErrorAccountMultiplierInvalid = "admin.connectionHealth.errors.accountMultiplierInvalid"
+	// ErrorAccountMultiplierUnsupported：当前存储实现尚未提供手动倍率能力（仅用于旧注入器）。
+	ErrorAccountMultiplierUnsupported = "admin.connectionHealth.errors.accountMultiplierUnsupported"
 	// ErrorMultiplierRequired 表示用户尝试给没有有效倍率的分组启用倍率优先级策略。
 	// 前端应提示先在上游配置倍率；后端绝不使用 1x 等猜测值代替。
 	ErrorMultiplierRequired = "admin.connectionHealth.errors.multiplierRequired"
@@ -137,6 +141,18 @@ type PrioritySyncState struct {
 	Conflict             bool      `json:"conflict"`
 	LastConflictPriority *int      `json:"lastConflictPriority,omitempty"`
 	UpdatedAt            time.Time `json:"updatedAt"`
+}
+
+// AccountMultiplierOverride 是按 workspace + 稳定 targetId 保存的手动账号/渠道倍率。
+// targetId 由 platform:adminAccountId:accountId 组成，避免同一用户切换 workspace 时串值。
+// 只有有效的非负数会落库；清除覆盖值时直接删除对应行。
+type AccountMultiplierOverride struct {
+	UserID         string    `json:"-"`
+	AdminAccountID string    `json:"-"`
+	TargetID       string    `json:"targetId"`
+	Multiplier     float64   `json:"multiplier"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
@@ -260,12 +276,17 @@ type ProbeOutcome struct {
 // 由 *my_sites.Service 结构性满足。定义为窄接口避免直接耦合 my_sites 内部实现。
 type MySitesReader interface {
 	ListRealConnections(ctx context.Context, userID string) ([]my_sites.RealConnection, error)
-	// ListRealConnectionsForWorkspace 按显式 userID+adminAccountID 读取，不依赖请求态"当前
-	// workspace"解析。后台 scheduler 用 context.Background() 启动、没有 HTTP 请求上下文，
-	// 必须用这个方法按策略自带的 workspace 读取连接，否则可能读到错误 workspace 或读不到数据。
-	ListRealConnectionsForWorkspace(ctx context.Context, userID string, adminAccountID string) ([]my_sites.RealConnection, error)
 	MappingOptions(ctx context.Context, userID string) (my_sites.MappingOptionsResponse, error)
 	RequireSession(ctx context.Context, userID string, adminAccountID string) (upstream.Session, error)
+}
+
+// WorkspaceRealConnectionsReader is the workspace-scoped variant of
+// MySitesReader. It stays optional so older test doubles and integrations that
+// only implement the original read methods remain source-compatible. The
+// production *my_sites.Service implements it; background scheduler code prefers
+// this method whenever available and defensively filters the legacy fallback.
+type WorkspaceRealConnectionsReader interface {
+	ListRealConnectionsForWorkspace(ctx context.Context, userID string, adminAccountID string) ([]my_sites.RealConnection, error)
 }
 
 // UpstreamKeyReader 是分组健康展示上游 API Key 当前分组时使用的可选能力。
@@ -273,6 +294,16 @@ type MySitesReader interface {
 // *my_sites.Service 已结构性满足该接口。调用方只读取 ID/分组元数据，绝不记录或返回 Key 明文。
 type UpstreamKeyReader interface {
 	ListUpstreamKeys(ctx context.Context, userID string, siteID string) ([]upstream.Sub2APIKeyItem, error)
+}
+
+// UpstreamKeyWorkspaceReader is the workspace-scoped variant of
+// UpstreamKeyReader. Background priority synchronization processes every
+// workspace without a request-scoped "current" account, so production
+// readers should implement this method whenever they can. It remains a
+// separate optional interface to preserve compatibility with older test
+// doubles and injected readers.
+type UpstreamKeyWorkspaceReader interface {
+	ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error)
 }
 
 // SiteLookup 是 connection_health 对 upstream 模块的只读依赖：按站点 ID 取 base_url 和平台类型。

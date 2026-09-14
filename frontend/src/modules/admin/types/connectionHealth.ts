@@ -114,6 +114,10 @@ export interface AdminGroupAccount {
   // 旧后端或无法可靠关联的账号不返回这两个字段，前端按未知值展示。
   upstreamKeyGroupName?: string
   upstreamKeyGroupMultiplier?: number
+  // 统一账号倍率：手动覆盖优先，其次为现有策略/分组/上游回退值。
+  accountMultiplier?: number | null
+  manualAccountMultiplier?: number | null
+  hasManualAccountMultiplier?: boolean
   // 独立探活字段：targetId 是稳定探活目标 ID，手动探活/事件按 targetId 走。
   targetId: string
   probeAvailable: boolean

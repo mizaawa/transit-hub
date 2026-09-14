@@ -544,6 +544,17 @@ func (s *Service) ListUpstreamKeys(ctx context.Context, userID string, siteID st
 	if err != nil {
 		return nil, err
 	}
+	return s.ListUpstreamKeysForWorkspace(ctx, userID, adminAccountID, siteID)
+}
+
+// ListUpstreamKeysForWorkspace 按显式 userID + adminAccountID 获取指定上游站点的
+// API Key/Token 列表，不解析请求态的“当前 workspace”。后台调度器处理其它 workspace
+// 时必须使用此方法，否则会把 Key 倍率读成当前浏览器 workspace 的数据，或因 workspace
+// 校验失败而静默丢失上游倍率来源。
+func (s *Service) ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(adminAccountID) == "" || strings.TrimSpace(siteID) == "" {
+		return nil, requestError(ErrorRequest)
+	}
 	upstreamSite, err := s.upstreamLookup.GetSite(ctx, siteID)
 	if err != nil || upstreamSite == nil || upstreamSite.Session == nil || upstreamSite.UserID != userID || upstreamSite.AdminAccountID != adminAccountID {
 		return nil, requestError(ErrorRequest)

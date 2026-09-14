@@ -140,6 +140,46 @@ func (l testUpstreamLookup) GetSite(ctx context.Context, siteID string) (*upstre
 	return nil, nil
 }
 
+func TestListUpstreamKeysForWorkspaceDoesNotUseCurrentWorkspace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/keys" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{
+				"id": 9, "name": "key", "group_id": 7,
+				"group": map[string]any{"name": "vip"},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	lookup := testUpstreamLookup{sites: map[string]*upstream.Site{
+		"site-other": {
+			ID: "site-other", UserID: "user1", AdminAccountID: "ws-other",
+			Session: &upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+		},
+	}}
+	service := &Service{
+		accounts:        testAdminResolver{currentID: "ws-current"},
+		upstreamLookup:  lookup,
+		platformService: upstream.NewPlatformService(upstream.NewHTTPClient(server.Client())),
+	}
+
+	keys, err := service.ListUpstreamKeysForWorkspace(context.Background(), "user1", "ws-other", "site-other")
+	if err != nil {
+		t.Fatalf("explicit workspace lookup failed: %v", err)
+	}
+	if len(keys) != 1 || keys[0].ID != "9" || keys[0].GroupID != "7" || keys[0].GroupName != "vip" {
+		t.Fatalf("unexpected key metadata: %+v", keys)
+	}
+
+	if _, err := service.ListUpstreamKeys(context.Background(), "user1", "site-other"); err == nil {
+		t.Fatal("current-workspace lookup should reject a site in another workspace")
+	}
+}
+
 func cloneState(state *State) *State {
 	if state == nil {
 		return nil
