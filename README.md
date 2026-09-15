@@ -70,6 +70,9 @@ docker build -f deploy/Dockerfile -t transithub:local .
 docker compose -f deploy/docker-compose.prod.yml up -d
 ```
 
+上面的命令适用于全新部署。已有旧版部署（容器名称通常以 `deploy-` 开头）请参阅下方的升级说明，
+不要直接启动第二个 Compose 项目。
+
 如果宿主机的 `5478` 已被其他服务占用，可只更换宿主机端口（容器内端口仍保持 `5478`）：
 
 ```bash
@@ -177,6 +180,21 @@ environment:
 TRANSITHUB_HOST_PORT=8080 docker compose -f deploy/docker-compose.prod.yml up -d
 ```
 
+如果之前使用过未声明项目名的旧部署，旧容器名称通常是 `deploy-app-1`，不会被新的
+`transithub-prod` 项目自动接管。启动新版本前先确认旧的 app 容器，并复用旧项目以避免端口冲突：
+
+```bash
+docker ps --filter "publish=5478" --format 'table {{.Names}}\t{{.Ports}}'
+# 先清理此前误启动的 transithub-prod 容器；不要加 --volumes/-v
+docker compose -f deploy/docker-compose.prod.yml down
+# 复用旧 deploy 项目的网络、PostgreSQL 和 Redis，只重建 app
+docker compose -p deploy -f deploy/docker-compose.prod.yml up -d --no-deps --force-recreate app
+```
+
+只有确认旧部署不再需要后，才删除旧容器；不要为解决端口冲突直接删除旧的 PostgreSQL 或 Redis 容器，
+以免误伤仍在使用的数据。如果旧 app 还必须继续运行，再使用前面的 `TRANSITHUB_HOST_PORT=8080` 方式
+为新 app 分配其他宿主机端口。
+
 ### 持久化数据
 
 默认存放在仓库根目录的 `data/`：
@@ -222,6 +240,13 @@ openssl rand -base64 32
 ```bash
 git pull
 docker build -f deploy/Dockerfile -t transithub:local .
+# 现有旧部署（原容器名为 deploy-*）使用旧项目名，避免切换到另一套数据库
+docker compose -p deploy -f deploy/docker-compose.prod.yml up -d --no-deps --force-recreate app
+```
+
+全新服务器才使用默认的 `transithub-prod` 项目：
+
+```bash
 docker compose -f deploy/docker-compose.prod.yml up -d
 ```
 
