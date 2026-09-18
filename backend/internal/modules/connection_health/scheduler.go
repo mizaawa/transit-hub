@@ -113,22 +113,22 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 	}
 	inventory := &adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
 	failedGroupIDs := make([]string, 0)
-	accountErrors := make([]error, 0)
+	accountErrorDetails := make([]string, 0)
 	for _, group := range groups {
 		accounts, accountsErr := s.platformGroups.ListAdminGroupAccounts(session, group)
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 		if accountsErr != nil {
 			failedGroupIDs = append(failedGroupIDs, group.ID)
-			accountErrors = append(accountErrors, accountsErr)
+			accountErrorDetails = append(accountErrorDetails, accountsErr.Error())
 		}
 	}
-	if len(accountErrors) > 0 {
+	if len(accountErrorDetails) > 0 {
 		// Keep the successful groups usable for this scheduler tick, but defer the
 		// next full workspace scan so a broken account-list endpoint is not hit
 		// every 30 seconds. This is the only log for this upstream request.
 		s.recordAdminInventoryFailure(key, now())
 		finalized = true
-		log.Printf("[connection-health] admin inventory group accounts failed user_id=%s admin_account_id=%s failed_group_ids=%v err=%v", userID, adminAccountID, failedGroupIDs, errors.Join(accountErrors...))
+		log.Printf("[connection-health] admin inventory group accounts failed user_id=%s admin_account_id=%s failed_group_ids=%v errors=%q", userID, adminAccountID, failedGroupIDs, accountErrorDetails)
 	} else {
 		s.inventoryBackoffMu.Lock()
 		delete(s.inventoryBackoffs, key)

@@ -237,6 +237,9 @@ func TestLoadAdminInventory_GroupAccountFailureReturnsPartialSnapshotAndBacksOff
 	if count := strings.Count(logs.String(), "admin inventory group accounts failed"); count != 1 {
 		t.Fatalf("account-list failures from one request must produce one aggregate log, count=%d logs=%q", count, logs.String())
 	}
+	if strings.Contains(strings.TrimSuffix(logs.String(), "\n"), "\n") {
+		t.Fatalf("aggregate account-list failure must stay on one physical log line: %q", logs.String())
+	}
 
 	cached, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", cache)
 	if err != nil || attempted || cached != inventory {
