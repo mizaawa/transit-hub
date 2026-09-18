@@ -167,9 +167,19 @@ func (s *Service) restoreUnmanagedTargetActions(
 		priorityByTarget[state.UserID+"|"+state.AdminAccountID+"|"+state.TargetID] = state
 	}
 	for _, stored := range states {
-		inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
+		// A conflict means an administrator changed the upstream target after this
+		// module took ownership. It is terminal until the administrator explicitly
+		// saves the group configuration again, which deletes the conflicted snapshot.
+		// Do not verify the admin session or reload the full inventory every scheduler
+		// tick for a checkpoint that we are forbidden to act on.
+		if stored.Conflict {
+			continue
+		}
+		inventory, err, attempted := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
 		if err != nil {
-			log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)
+			if attempted {
+				log.Printf("[connection-health] restore unmanaged target inventory failed user_id=%s admin_account_id=%s err=%v", stored.UserID, stored.AdminAccountID, err)
+			}
 			continue
 		}
 		inventoryComplete := true
@@ -241,7 +251,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
 		currentWeight := normalizedTargetWeight(target)
-		if stored.Conflict || (targetVisible && targetActionCheckpointConflicted(target, &stored, currentStatus, currentWeight)) {
+		if targetVisible && targetActionCheckpointConflicted(target, &stored, currentStatus, currentWeight) {
 			stored.Conflict = true
 			stored.PendingStatus = ""
 			stored.PendingWeight = nil

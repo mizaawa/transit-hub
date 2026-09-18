@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
@@ -64,6 +65,10 @@ type Service struct {
 	modelDiscovery  *ModelDiscoveryRunner
 	platformGroups  PlatformGroupReader
 	priorityActions TargetPriorityActioner
+
+	inventoryBackoffMu sync.Mutex
+	inventoryBackoffs  map[string]adminInventoryBackoff
+	inventoryNow       func() time.Time
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {

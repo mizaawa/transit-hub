@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -52,28 +53,80 @@ type adminInventoryCacheEntry struct {
 
 type adminInventoryCache map[string]adminInventoryCacheEntry
 
-func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAccountID string, cache adminInventoryCache) (*adminWorkspaceInventory, error) {
+type adminInventoryBackoff struct {
+	failures int
+	retryAt  time.Time
+	inFlight bool
+}
+
+var errAdminInventoryRetryDeferred = errors.New("admin inventory retry deferred")
+
+var adminInventoryRetryDelays = [...]time.Duration{2 * time.Minute, 5 * time.Minute, 10 * time.Minute}
+
+// loadAdminInventory returns attempted=true only when this call reached the upstream session/group APIs.
+// Callers use it to log one failure per actual workspace request while cached and deferred failures stay quiet.
+func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAccountID string, cache adminInventoryCache) (*adminWorkspaceInventory, error, bool) {
 	key := userID + "|" + adminAccountID
 	if cached, ok := cache[key]; ok {
-		return cached.inventory, cached.err
+		return cached.inventory, cached.err, false
 	}
+	now := time.Now
+	if s.inventoryNow != nil {
+		now = s.inventoryNow
+	}
+	s.inventoryBackoffMu.Lock()
+	backoff := s.inventoryBackoffs[key]
+	if backoff.inFlight || now().Before(backoff.retryAt) {
+		s.inventoryBackoffMu.Unlock()
+		cache[key] = adminInventoryCacheEntry{err: errAdminInventoryRetryDeferred}
+		return nil, errAdminInventoryRetryDeferred, false
+	}
+	backoff.inFlight = true
+	if s.inventoryBackoffs == nil {
+		s.inventoryBackoffs = make(map[string]adminInventoryBackoff)
+	}
+	s.inventoryBackoffs[key] = backoff
+	s.inventoryBackoffMu.Unlock()
+
 	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
 	if err != nil {
+		s.recordAdminInventoryFailure(key, now())
 		cache[key] = adminInventoryCacheEntry{err: err}
-		return nil, err
+		return nil, err, true
 	}
 	groups, err := s.platformGroups.FetchAdminAllGroups(session)
 	if err != nil {
+		s.recordAdminInventoryFailure(key, now())
 		cache[key] = adminInventoryCacheEntry{err: err}
-		return nil, err
+		return nil, err, true
 	}
 	inventory := &adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
 	for _, group := range groups {
 		accounts, accountsErr := s.platformGroups.ListAdminGroupAccounts(session, group)
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
+	s.inventoryBackoffMu.Lock()
+	delete(s.inventoryBackoffs, key)
+	s.inventoryBackoffMu.Unlock()
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
-	return inventory, nil
+	return inventory, nil, true
+}
+
+func (s *Service) recordAdminInventoryFailure(key string, now time.Time) {
+	s.inventoryBackoffMu.Lock()
+	defer s.inventoryBackoffMu.Unlock()
+	backoff := s.inventoryBackoffs[key]
+	backoff.failures++
+	delayIndex := backoff.failures - 1
+	if delayIndex >= len(adminInventoryRetryDelays) {
+		delayIndex = len(adminInventoryRetryDelays) - 1
+	}
+	backoff.retryAt = now.Add(adminInventoryRetryDelays[delayIndex])
+	backoff.inFlight = false
+	if s.inventoryBackoffs == nil {
+		s.inventoryBackoffs = make(map[string]adminInventoryBackoff)
+	}
+	s.inventoryBackoffs[key] = backoff
 }
 
 // StartScheduler 启动后台探活调度：立即跑一次，之后每 30s 一次。tick 和每个探活 goroutine
@@ -155,9 +208,9 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 
 	// 先根据上一轮健康状态同步 priority，避免历史修复把旧版关闭的 Sub2API
 	// 账号重新启用后，在整轮探活期间以原高优先级接收流量。
-	preSyncInventoryCache := make(adminInventoryCache)
+	probeInventoryCache := make(adminInventoryCache)
 	s.syncMultiplierPrioritiesWithCache(
-		ctx, policies, assignments, groupAssignments, exclusions, priorityStates, preSyncInventoryCache,
+		ctx, policies, assignments, groupAssignments, exclusions, priorityStates, probeInventoryCache,
 	)
 	refreshedPriorityStates, refreshErr := s.repo.ListAllPrioritySyncStates(ctx)
 	if refreshErr != nil {
@@ -167,11 +220,10 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		refreshedPriorityStates = nil
 	}
 
-	// status 恢复必须重新读取远端 priority，以确认上面的接管写入已经可见；探活
-	// job 可以复用这份快照。探活后的同步仍需再次刷新，以看到期间的人工修改。
-	probeInventoryCache := make(adminInventoryCache)
+	// status 恢复必须重新读取远端 priority，以确认上面的接管写入已经可见。普通探活
+	// 复用预同步快照，避免同一轮重复读取；探活后的同步仍需刷新以看到期间的人工修改。
 	s.restoreUnmanagedTargetActions(
-		ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, refreshedPriorityStates, probeInventoryCache,
+		ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, refreshedPriorityStates, make(adminInventoryCache),
 	)
 	if len(policies) == 0 {
 		return
@@ -344,9 +396,11 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		if !hasEnabledModelTarget(ws.policies) {
 			continue
 		}
-		inventory, err := s.loadAdminInventory(ctx, ws.userID, ws.adminAccountID, inventoryCache)
+		inventory, err, attempted := s.loadAdminInventory(ctx, ws.userID, ws.adminAccountID, inventoryCache)
 		if err != nil {
-			log.Printf("[connection-health] scheduler load admin inventory failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, err)
+			if attempted {
+				log.Printf("[connection-health] scheduler load admin inventory failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, err)
+			}
 			continue
 		}
 		session := inventory.session

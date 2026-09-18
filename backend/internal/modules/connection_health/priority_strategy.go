@@ -84,9 +84,11 @@ func (s *Service) syncMultiplierPrioritiesWithCache(
 
 	for workspaceKey, identity := range workspaceIdentity {
 		userID, adminAccountID := identity[0], identity[1]
-		inventorySnapshot, err := s.loadAdminInventory(ctx, userID, adminAccountID, inventoryCache)
+		inventorySnapshot, err, attempted := s.loadAdminInventory(ctx, userID, adminAccountID, inventoryCache)
 		if err != nil {
-			log.Printf("[connection-health] priority sync load admin inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+			if attempted {
+				log.Printf("[connection-health] priority sync load admin inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+			}
 			continue
 		}
 		session := inventorySnapshot.session

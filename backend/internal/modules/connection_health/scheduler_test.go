@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,125 @@ type mutableSchedulerPriorityReader struct {
 	priority   int
 	listCalls  int
 	credential upstream.ProbeCredential
+}
+
+type failingInventoryMySitesReader struct {
+	fakeMySitesReader
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+type failingInventoryGroupReader struct {
+	fakePlatformGroupReader
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (r *failingInventoryGroupReader) FetchAdminAllGroups(upstream.Session) ([]upstream.AdminGroupInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return nil, r.err
+}
+
+func (r *failingInventoryGroupReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *failingInventoryMySitesReader) RequireSession(context.Context, string, string) (upstream.Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return r.session, r.err
+}
+
+func (r *failingInventoryMySitesReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func TestLoadAdminInventory_UsesWorkspaceFailureBackoff(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	sessionErr := errors.New("session unavailable")
+	mySites := &failingInventoryMySitesReader{
+		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		err:               sessionErr,
+	}
+	service := &Service{
+		mySites: mySites, platformGroups: fakePlatformGroupReader{}, inventoryNow: func() time.Time { return now },
+	}
+
+	load := func(wantAttempt bool, wantCalls int) {
+		t.Helper()
+		_, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+		if err == nil {
+			t.Fatal("expected inventory load failure")
+		}
+		if attempted != wantAttempt || mySites.callCount() != wantCalls {
+			t.Fatalf("attempted=%v calls=%d, want attempted=%v calls=%d", attempted, mySites.callCount(), wantAttempt, wantCalls)
+		}
+		if !wantAttempt && !errors.Is(err, errAdminInventoryRetryDeferred) {
+			t.Fatalf("deferred load error=%v, want %v", err, errAdminInventoryRetryDeferred)
+		}
+	}
+
+	load(true, 1)
+	now = now.Add(2*time.Minute - time.Second)
+	load(false, 1)
+	now = now.Add(time.Second)
+	load(true, 2)
+	now = now.Add(5*time.Minute - time.Second)
+	load(false, 2)
+	now = now.Add(time.Second)
+	load(true, 3)
+	now = now.Add(10*time.Minute - time.Second)
+	load(false, 3)
+	now = now.Add(time.Second)
+	load(true, 4)
+	now = now.Add(10*time.Minute - time.Second)
+	load(false, 4)
+	now = now.Add(time.Second)
+	load(true, 5)
+}
+
+func TestLoadAdminInventory_CacheFailureReportsOnlyActualRequest(t *testing.T) {
+	mySites := &failingInventoryMySitesReader{err: errors.New("session unavailable")}
+	service := &Service{mySites: mySites, platformGroups: fakePlatformGroupReader{}}
+	cache := make(adminInventoryCache)
+
+	_, _, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", cache)
+	if !attempted {
+		t.Fatal("the first load must report the actual upstream request")
+	}
+	_, _, attempted = service.loadAdminInventory(context.Background(), "user1", "ws1", cache)
+	if attempted || mySites.callCount() != 1 {
+		t.Fatalf("cached failure must stay quiet, attempted=%v calls=%d", attempted, mySites.callCount())
+	}
+}
+
+func TestLoadAdminInventory_FetchGroupsFailureBacksOffAcrossTicks(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	groups := &failingInventoryGroupReader{err: errors.New("admin groups unavailable")}
+	service := &Service{
+		mySites:        fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: groups,
+		inventoryNow:   func() time.Time { return now },
+	}
+
+	_, _, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if !attempted || groups.callCount() != 1 {
+		t.Fatalf("initial group fetch must be attempted once, attempted=%v calls=%d", attempted, groups.callCount())
+	}
+	now = now.Add(schedulerTickInterval)
+	_, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if attempted || !errors.Is(err, errAdminInventoryRetryDeferred) || groups.callCount() != 1 {
+		t.Fatalf("next scheduler tick must be deferred, attempted=%v err=%v calls=%d", attempted, err, groups.callCount())
+	}
 }
 
 func (r *mutableSchedulerPriorityReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
@@ -93,8 +213,8 @@ func TestRunSchedulerTick_ManualPriorityChangeDuringProbeBecomesConflict(t *test
 	if !ok || !stored.Conflict || stored.LastConflictPriority == nil || *stored.LastConflictPriority != 23 {
 		t.Fatalf("manual priority change must be recorded as a conflict, got %+v", stored)
 	}
-	if calls := reader.accountListCalls(); calls < 2 {
-		t.Fatalf("post-probe sync must reload upstream inventory, account list calls=%d", calls)
+	if calls := reader.accountListCalls(); calls != 2 {
+		t.Fatalf("pre-sync and probe collection must share inventory while post-probe sync reloads it, account list calls=%d", calls)
 	}
 }
 

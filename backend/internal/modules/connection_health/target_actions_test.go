@@ -4,8 +4,26 @@ import (
 	"context"
 	"testing"
 
+	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
 )
+
+type targetActionMySitesSpy struct {
+	requireSessionCalls int
+}
+
+func (s *targetActionMySitesSpy) ListRealConnections(context.Context, string) ([]my_sites.RealConnection, error) {
+	return nil, nil
+}
+
+func (s *targetActionMySitesSpy) MappingOptions(context.Context, string) (my_sites.MappingOptionsResponse, error) {
+	return my_sites.MappingOptionsResponse{}, nil
+}
+
+func (s *targetActionMySitesSpy) RequireSession(context.Context, string, string) (upstream.Session, error) {
+	s.requireSessionCalls++
+	return upstream.Session{Platform: upstream.PlatformSub2API}, nil
+}
 
 func TestReconcileTargetRemoteAction_Sub2APINeverWritesStatusOrCreatesSnapshot(t *testing.T) {
 	tests := []struct {
@@ -230,6 +248,34 @@ func TestRestoreUnmanagedTargetActions_DoesNotOverwriteManualSub2APIStatusConfli
 	}
 	if len(repo.events) != 0 {
 		t.Fatalf("manual conflict must not emit a restore event: %+v", repo.events)
+	}
+}
+
+func TestRestoreUnmanagedTargetActions_ExistingConflictSkipsInventory(t *testing.T) {
+	repo := newFakeRepository()
+	mySites := &targetActionMySitesSpy{}
+	service := &Service{
+		repo: repo, mySites: mySites,
+		platformGroups: fakePlatformGroupReader{
+			groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		},
+	}
+	stored := TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:acc-1",
+		OriginalStatus: "active", LastAppliedStatus: "inactive", Conflict: true,
+	}
+	repo.targetActionStates["user1|ws1|"+stored.TargetID] = stored
+
+	service.restoreUnmanagedTargetActions(
+		context.Background(), nil, nil, nil, nil,
+		[]TargetActionState{stored}, nil, make(adminInventoryCache),
+	)
+
+	if mySites.requireSessionCalls != 0 {
+		t.Fatalf("an existing conflict must not reload upstream inventory, session calls=%d", mySites.requireSessionCalls)
+	}
+	if got, exists := repo.targetActionStates["user1|ws1|"+stored.TargetID]; !exists || got != stored {
+		t.Fatalf("an existing conflict must remain untouched until explicit reset: exists=%v state=%+v", exists, got)
 	}
 }
 
