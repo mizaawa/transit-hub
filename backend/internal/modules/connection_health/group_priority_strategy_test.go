@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -994,6 +995,7 @@ func TestSub2APIHealthPrioritySync_DoesNotReduceExistingBlockedPriority(t *testi
 func TestSub2APIHealthPrioritySync_WaitsForCompleteInventory(t *testing.T) {
 	repo := newFakeRepository()
 	priorityActions := &fakeTargetPriorityActioner{}
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
 	targetPriority := 7
 	peerPriority := 35000
 	reader := fakePlatformGroupReader{
@@ -1006,7 +1008,7 @@ func TestSub2APIHealthPrioritySync_WaitsForCompleteInventory(t *testing.T) {
 	}
 	service := &Service{
 		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
-		platformGroups: reader, priorityActions: priorityActions,
+		platformGroups: reader, priorityActions: priorityActions, inventoryNow: func() time.Time { return now },
 	}
 	policy := Policy{
 		ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
@@ -1028,6 +1030,7 @@ func TestSub2APIHealthPrioritySync_WaitsForCompleteInventory(t *testing.T) {
 	}
 
 	delete(reader.errByGrp, "unavailable")
+	now = now.Add(adminInventoryRetryDelays[0])
 	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, []PolicyAssignment{assignment}, nil, nil, nil)
 	if len(priorityActions.calls) != 1 || priorityActions.calls[0].priority != peerPriority {
 		t.Fatalf("complete inventory must apply the real workspace blocking tier: %+v", priorityActions.calls)

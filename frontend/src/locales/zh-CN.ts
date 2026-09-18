@@ -469,7 +469,7 @@ export default {
         title: '需要关注',
         subtitle: '健康状态与上游余额异常',
         healthTitle: '目标健康状态异常',
-        healthDescription: '{attention} 个需观察，{suspended} 个已暂停或禁用',
+        healthDescription: '{attention} 个需观察，{suspended} 个故障冷却或已禁用',
         failuresTitle: '近 24 小时探活失败',
         failuresDescription: '查看失败分类与最近状态变化',
         upstreamTitle: '上游余额待处理',
@@ -934,7 +934,7 @@ export default {
           hint: '健康状态按模型统计；待首次探活和不可探活按账号/渠道统计，不代表上游原始启停状态。',
           healthy: '健康模型',
           degraded: '降级模型',
-          suspended: '探活暂停',
+          suspended: '故障冷却',
           observing: '恢复观察',
           recovering: '逐步恢复',
           disabled: '手动禁用',
@@ -1096,7 +1096,7 @@ export default {
       stateLabels: {
         healthy: '健康',
         degraded: '降级',
-        suspended: '探活暂停',
+        suspended: '故障冷却',
         observing: '观察中',
         recovering: '恢复中',
         disabled: '已禁用'
@@ -1275,7 +1275,7 @@ export default {
           dailyBudget: '限制当前 workspace 每天最多执行多少次真实探活请求；预算耗尽后会跳过真实探活请求，避免消耗过高，不代表系统异常。',
           failureThreshold: '连续软失败达到该次数后会暂停/降级对应链路；某些硬失败（如鉴权失败）可能不经过降级直接暂停。',
           successThreshold: '观察期内连续探活成功达到该次数后，才会判定链路真正恢复并回到健康状态。',
-          cooldown: '链路被暂停后，在这段冷却时间结束前，调度器不会对其发起自动探活。',
+          cooldown: '链路进入故障冷却后，调度器会同时等待冷却时间和失败退避结束，两者都到期后才会重新探活。',
           observation: '人工恢复或自动恢复流程触发后会进入观察期，这段时间的连续探活结果用于确认链路是否真的已经稳定。',
           recoveryStep: '恢复过程中每次探活成功会按该百分比逐步提高本地权重，不是一次性恢复到 100%。',
           autoDegrade: '开启后，探活结果会推进链路的健康状态机并调整本地转发权重；关闭后只记录探活结果，不会自动改变状态或权重。',
@@ -1314,7 +1314,7 @@ export default {
             },
             cooldownObservation: {
               title: '7. 冷却和观察',
-              description: '目标/模型被暂停后会进入策略配置的冷却时间，冷却结束前调度器不会对其发起自动探活。冷却结束、或管理员手动点击"恢复"之后会进入观察阶段：这段时间内的连续探活结果用于判断目标是否真的恢复稳定，只有连续成功次数达到"恢复成功阈值"才会真正回到健康状态。'
+              description: '目标/模型进入故障冷却后，调度器会等待策略冷却和失败退避都结束，再发起一次自动探活。只有这次探活成功，或管理员手动点击"恢复"，才会进入观察阶段；继续失败会保持故障冷却并等待下一次重试。观察期内只有连续成功次数达到"恢复成功阈值"才会真正回到健康状态。'
             },
             autoDegradeVsRemoteAction: {
               title: '8. 自动降级和自动远端动作的区别',

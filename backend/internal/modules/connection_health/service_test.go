@@ -739,6 +739,18 @@ func TestStoredSummary_DeduplicatesTargetsAndKeepsWorkspaceIsolated(t *testing.T
 	olderProbe := now.Add(-2 * time.Hour)
 	latestProbe := now.Add(-30 * time.Minute)
 	repo := newFakeRepository()
+	repo.policies = []Policy{{
+		ID: "policy-1", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		ModelTargets: []ModelTarget{
+			{PolicyID: "policy-1", ModelName: "model-a", Enabled: true},
+			{PolicyID: "policy-1", ModelName: "model-b", Enabled: true},
+		},
+	}}
+	repo.assignments = []PolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "target-healthy", PolicyID: "policy-1"},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "target-attention", PolicyID: "policy-1"},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "target-suspended", PolicyID: "policy-1"},
+	}
 	repo.states["target-healthy"] = map[string]ConnectionHealthState{
 		"model-a": {ConnectionID: "target-healthy", ModelName: "model-a", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy, LastProbeAt: &olderProbe},
 		"model-b": {ConnectionID: "target-healthy", ModelName: "model-b", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy},
@@ -775,6 +787,103 @@ func TestStoredSummary_DeduplicatesTargetsAndKeepsWorkspaceIsolated(t *testing.T
 	}
 	if summary.LastProbeAt == nil || !summary.LastProbeAt.Equal(latestProbe) {
 		t.Fatalf("expected latest probe %v, got %v", latestProbe, summary.LastProbeAt)
+	}
+}
+
+func TestStoredSummary_FiltersStatesOutsideCurrentProbeConfiguration(t *testing.T) {
+	now := time.Now()
+	configurationAt := now.Add(-time.Hour)
+	activeProbe := now.Add(-30 * time.Minute)
+	explicitProbe := now.Add(-20 * time.Minute)
+	staleProbe := now.Add(-2 * time.Hour)
+	repo := newFakeRepository()
+	repo.policies = []Policy{
+		{
+			ID: "active-policy", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+			StrategyMode: StrategyModeHealthProbe, UpdatedAt: configurationAt.Add(-time.Minute),
+			ModelTargets: []ModelTarget{{
+				PolicyID: "active-policy", ModelName: "current-model", Enabled: true,
+				UpdatedAt: configurationAt.Add(-time.Minute),
+			}},
+		},
+		{
+			ID: "disabled-policy", UserID: "user1", AdminAccountID: "ws1", Enabled: false,
+			ModelTargets: []ModelTarget{{PolicyID: "disabled-policy", ModelName: "disabled-model", Enabled: true}},
+		},
+	}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "group-1", PolicyID: "active-policy",
+		CreatedAt: configurationAt, UpdatedAt: configurationAt,
+	}}
+	repo.assignments = []PolicyAssignment{
+		{
+			UserID: "user1", AdminAccountID: "ws1", TargetID: "target-explicit", PolicyID: "active-policy",
+			CreatedAt: configurationAt, UpdatedAt: configurationAt,
+		},
+		{
+			UserID: "user1", AdminAccountID: "ws1", TargetID: "target-disabled-policy", PolicyID: "disabled-policy",
+			CreatedAt: configurationAt, UpdatedAt: configurationAt,
+		},
+	}
+	repo.groupExclusions = []GroupTargetExclusion{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "group-1", TargetID: "target-excluded",
+	}}
+	repo.states["target-active"] = map[string]ConnectionHealthState{
+		"current-model": {
+			ConnectionID: "target-active", ModelName: "current-model", UserID: "user1", AdminAccountID: "ws1",
+			UpstreamGroupID: "group-1", State: StateSuspended, LastProbeAt: &activeProbe, UpdatedAt: activeProbe,
+		},
+	}
+	repo.states["target-explicit"] = map[string]ConnectionHealthState{
+		"current-model": {
+			ConnectionID: "target-explicit", ModelName: "current-model", UserID: "user1", AdminAccountID: "ws1",
+			State: StateHealthy, LastProbeAt: &explicitProbe, UpdatedAt: explicitProbe,
+		},
+	}
+	repo.states["target-before-binding"] = map[string]ConnectionHealthState{
+		"current-model": {
+			ConnectionID: "target-before-binding", ModelName: "current-model", UserID: "user1", AdminAccountID: "ws1",
+			UpstreamGroupID: "group-1", State: StateSuspended, LastProbeAt: &staleProbe, UpdatedAt: staleProbe,
+		},
+	}
+	repo.states["target-old-model"] = map[string]ConnectionHealthState{
+		"old-model": {
+			ConnectionID: "target-old-model", ModelName: "old-model", UserID: "user1", AdminAccountID: "ws1",
+			UpstreamGroupID: "group-1", State: StateSuspended, LastProbeAt: &activeProbe, UpdatedAt: activeProbe,
+		},
+	}
+	repo.states["target-excluded"] = map[string]ConnectionHealthState{
+		"current-model": {
+			ConnectionID: "target-excluded", ModelName: "current-model", UserID: "user1", AdminAccountID: "ws1",
+			UpstreamGroupID: "group-1", State: StateSuspended, LastProbeAt: &activeProbe, UpdatedAt: activeProbe,
+		},
+	}
+	repo.states["target-disabled-policy"] = map[string]ConnectionHealthState{
+		"disabled-model": {
+			ConnectionID: "target-disabled-policy", ModelName: "disabled-model", UserID: "user1", AdminAccountID: "ws1",
+			State: StateSuspended, LastProbeAt: &activeProbe, UpdatedAt: activeProbe,
+		},
+	}
+	repo.targetActionStates["user1|ws1|target-active"] = TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "target-active",
+	}
+	repo.targetActionStates["user1|ws1|target-before-binding"] = TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "target-before-binding",
+	}
+	service := &Service{repo: repo, accounts: fakeAdminAccountResolver{id: "ws1"}}
+
+	summary, err := service.StoredSummary(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("StoredSummary() error = %v", err)
+	}
+	if summary.TotalTargets != 2 || summary.HealthyTargets != 1 || summary.SuspendedTargets != 1 || summary.AttentionTargets != 0 {
+		t.Fatalf("summary must contain only current configured target/model states: %+v", summary)
+	}
+	if summary.ManagedTargets != 1 {
+		t.Fatalf("stale action checkpoints must not count as currently managed: %+v", summary)
+	}
+	if summary.LastProbeAt == nil || !summary.LastProbeAt.Equal(explicitProbe) {
+		t.Fatalf("last probe must ignore stale configuration rows, got %v", summary.LastProbeAt)
 	}
 }
 

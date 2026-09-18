@@ -185,14 +185,36 @@ type StoredSummaryResponse struct {
 	LastProbeAt         *time.Time `json:"lastProbeAt,omitempty"`
 }
 
+type storedSummaryPolicyBinding struct {
+	policy     Policy
+	assignedAt time.Time
+}
+
 // StoredSummary 读取当前 workspace 已落库的健康状态。一个目标可能包含多个模型状态，
-// 这里只按目标去重并采用最高风险状态，避免多模型配置让工作台数字失真。
+// 这里只统计当前启用的探活策略、模型和分配，再按目标去重并采用最高风险状态。
+// 历史状态仍保留在数据库中，但旧模型、已解绑目标和重新绑定前的状态不再污染工作台。
 func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSummaryResponse, error) {
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
 		return StoredSummaryResponse{}, err
 	}
 
+	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
+	if err != nil {
+		return StoredSummaryResponse{}, err
+	}
+	assignments, err := s.repo.ListPolicyAssignmentsByWorkspace(ctx, userID, adminAccountID)
+	if err != nil {
+		return StoredSummaryResponse{}, err
+	}
+	groupAssignments, err := s.repo.ListGroupPolicyAssignmentsByWorkspace(ctx, userID, adminAccountID)
+	if err != nil {
+		return StoredSummaryResponse{}, err
+	}
+	groupExclusions, err := s.repo.ListGroupTargetExclusionsByWorkspace(ctx, userID, adminAccountID)
+	if err != nil {
+		return StoredSummaryResponse{}, err
+	}
 	states, err := s.repo.ListStatesByWorkspace(ctx, userID, adminAccountID)
 	if err != nil {
 		return StoredSummaryResponse{}, err
@@ -206,6 +228,36 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 		return StoredSummaryResponse{}, err
 	}
 
+	policyByID := make(map[string]Policy, len(policies))
+	for _, policy := range policies {
+		if policy.Enabled && policySupportsProbing(policy) && hasEnabledModelTarget([]Policy{policy}) {
+			policyByID[policy.ID] = policy
+		}
+	}
+	targetBindings := make(map[string][]storedSummaryPolicyBinding)
+	for _, assignment := range assignments {
+		if policy, ok := policyByID[assignment.PolicyID]; ok {
+			targetBindings[assignment.TargetID] = append(targetBindings[assignment.TargetID], storedSummaryPolicyBinding{
+				policy: policy, assignedAt: assignmentEffectiveAt(assignment.CreatedAt, assignment.UpdatedAt),
+			})
+		}
+	}
+	groupBindings := make(map[string][]storedSummaryPolicyBinding)
+	for _, assignment := range groupAssignments {
+		if policy, ok := policyByID[assignment.PolicyID]; ok {
+			groupBindings[assignment.AdminGroupID] = append(groupBindings[assignment.AdminGroupID], storedSummaryPolicyBinding{
+				policy: policy, assignedAt: assignmentEffectiveAt(assignment.CreatedAt, assignment.UpdatedAt),
+			})
+		}
+	}
+	excludedTargets := make(map[string]map[string]bool)
+	for _, exclusion := range groupExclusions {
+		if excludedTargets[exclusion.AdminGroupID] == nil {
+			excludedTargets[exclusion.AdminGroupID] = make(map[string]bool)
+		}
+		excludedTargets[exclusion.AdminGroupID][exclusion.TargetID] = true
+	}
+
 	const (
 		targetHealthy = iota + 1
 		targetAttention
@@ -214,6 +266,9 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 	targetRisk := make(map[string]int)
 	var lastProbeAt *time.Time
 	for _, state := range states {
+		if !storedSummaryStateIsCurrent(state, targetBindings, groupBindings, excludedTargets) {
+			continue
+		}
 		risk := targetHealthy
 		switch state.State {
 		case StateSuspended, StateDisabled:
@@ -230,9 +285,15 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 		}
 	}
 
+	managedTargets := 0
+	for _, actionState := range actionStates {
+		if _, current := targetRisk[actionState.TargetID]; current {
+			managedTargets++
+		}
+	}
 	response := StoredSummaryResponse{
 		TotalTargets:        len(targetRisk),
-		ManagedTargets:      len(actionStates),
+		ManagedTargets:      managedTargets,
 		RecentFailureEvents: recentFailures,
 		LastProbeAt:         lastProbeAt,
 	}
@@ -247,6 +308,50 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 		}
 	}
 	return response, nil
+}
+
+func assignmentEffectiveAt(createdAt time.Time, updatedAt time.Time) time.Time {
+	if updatedAt.After(createdAt) {
+		return updatedAt
+	}
+	return createdAt
+}
+
+func storedSummaryStateIsCurrent(
+	state ConnectionHealthState,
+	targetBindings map[string][]storedSummaryPolicyBinding,
+	groupBindings map[string][]storedSummaryPolicyBinding,
+	excludedTargets map[string]map[string]bool,
+) bool {
+	bindings := append([]storedSummaryPolicyBinding(nil), targetBindings[state.ConnectionID]...)
+	groupID := strings.TrimSpace(state.UpstreamGroupID)
+	if groupID == "" {
+		groupID = strings.TrimSpace(state.OwnGroupID)
+	}
+	if groupID != "" && !excludedTargets[groupID][state.ConnectionID] {
+		bindings = append(bindings, groupBindings[groupID]...)
+	}
+	for _, binding := range bindings {
+		for _, target := range binding.policy.ModelTargets {
+			if !target.Enabled || strings.TrimSpace(target.ModelName) != state.ModelName {
+				continue
+			}
+			activeSince := binding.assignedAt
+			if binding.policy.UpdatedAt.After(activeSince) {
+				activeSince = binding.policy.UpdatedAt
+			}
+			if target.UpdatedAt.After(activeSince) {
+				activeSince = target.UpdatedAt
+			}
+			// Zero timestamps are used by in-memory adapters and old imported rows.
+			// When both sides have real timestamps, require a probe after the current
+			// policy/binding became active so an old state cannot reappear immediately.
+			if state.UpdatedAt.IsZero() || activeSince.IsZero() || !state.UpdatedAt.Before(activeSince) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Groups 按「我的分组 -> 对接链路 -> 模型」聚合当前 workspace 的健康状态。

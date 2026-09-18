@@ -1,11 +1,14 @@
 package connection_health
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +37,27 @@ type failingInventoryGroupReader struct {
 	err   error
 }
 
+type panickingInventoryMySitesReader struct {
+	fakeMySitesReader
+	mu    sync.Mutex
+	calls int
+}
+
+type blockingInventoryMySitesReader struct {
+	fakeMySitesReader
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type inventoryLoadResult struct {
+	inventory *adminWorkspaceInventory
+	err       error
+	attempted bool
+}
+
 func (r *failingInventoryGroupReader) FetchAdminAllGroups(upstream.Session) ([]upstream.AdminGroupInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -55,6 +79,40 @@ func (r *failingInventoryMySitesReader) RequireSession(context.Context, string, 
 }
 
 func (r *failingInventoryMySitesReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *failingInventoryMySitesReader) setError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
+func (r *panickingInventoryMySitesReader) RequireSession(context.Context, string, string) (upstream.Session, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	panic("inventory session panic")
+}
+
+func (r *panickingInventoryMySitesReader) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *blockingInventoryMySitesReader) RequireSession(context.Context, string, string) (upstream.Session, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	r.once.Do(func() { close(r.started) })
+	<-r.release
+	return r.session, nil
+}
+
+func (r *blockingInventoryMySitesReader) callCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
@@ -136,6 +194,171 @@ func TestLoadAdminInventory_FetchGroupsFailureBacksOffAcrossTicks(t *testing.T) 
 	_, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
 	if attempted || !errors.Is(err, errAdminInventoryRetryDeferred) || groups.callCount() != 1 {
 		t.Fatalf("next scheduler tick must be deferred, attempted=%v err=%v calls=%d", attempted, err, groups.callCount())
+	}
+}
+
+func TestLoadAdminInventory_GroupAccountFailureReturnsPartialSnapshotAndBacksOff(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "healthy"}, {ID: "broken-a"}, {ID: "broken-b"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"healthy": {{ID: "account-1"}},
+		},
+		errByGrp: map[string]error{
+			"broken-a": errors.New("accounts unavailable a"),
+			"broken-b": errors.New("accounts unavailable b"),
+		},
+	}
+	service := &Service{
+		mySites:        fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader,
+		inventoryNow:   func() time.Time { return now },
+	}
+	var logs bytes.Buffer
+	previousWriter, previousFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+
+	cache := make(adminInventoryCache)
+	inventory, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", cache)
+	if err != nil || !attempted {
+		t.Fatalf("partial inventory must remain usable in the current tick, attempted=%v err=%v", attempted, err)
+	}
+	if len(inventory.groups) != 3 || len(inventory.groups[0].accounts) != 1 || inventory.groups[0].err != nil {
+		t.Fatalf("successful group missing from partial inventory: %+v", inventory.groups)
+	}
+	if inventory.groups[1].err == nil || inventory.groups[2].err == nil {
+		t.Fatalf("failed groups must remain marked in the partial inventory: %+v", inventory.groups)
+	}
+	if count := strings.Count(logs.String(), "admin inventory group accounts failed"); count != 1 {
+		t.Fatalf("account-list failures from one request must produce one aggregate log, count=%d logs=%q", count, logs.String())
+	}
+
+	cached, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", cache)
+	if err != nil || attempted || cached != inventory {
+		t.Fatalf("the current tick must reuse its partial snapshot, attempted=%v err=%v inventory=%p want=%p", attempted, err, cached, inventory)
+	}
+	if count := strings.Count(logs.String(), "admin inventory group accounts failed"); count != 1 {
+		t.Fatalf("cached partial inventory must not be logged again, count=%d logs=%q", count, logs.String())
+	}
+
+	now = now.Add(schedulerTickInterval)
+	_, err, attempted = service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if attempted || !errors.Is(err, errAdminInventoryRetryDeferred) {
+		t.Fatalf("the next scheduler tick must defer a partial inventory retry, attempted=%v err=%v", attempted, err)
+	}
+}
+
+func TestLoadAdminInventory_PanicRecordsBackoffAndRepanics(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	mySites := &panickingInventoryMySitesReader{
+		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+	}
+	service := &Service{
+		mySites: mySites, platformGroups: fakePlatformGroupReader{}, inventoryNow: func() time.Time { return now },
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	}()
+	if recovered != "inventory session panic" {
+		t.Fatalf("inventory panic must propagate unchanged, recovered=%v", recovered)
+	}
+
+	now = now.Add(schedulerTickInterval)
+	_, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if attempted || !errors.Is(err, errAdminInventoryRetryDeferred) || mySites.callCount() != 1 {
+		t.Fatalf("panic must release in-flight state into backoff, attempted=%v err=%v calls=%d", attempted, err, mySites.callCount())
+	}
+}
+
+func TestLoadAdminInventory_SuccessResetsFailureBackoff(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	sessionErr := errors.New("session unavailable")
+	mySites := &failingInventoryMySitesReader{
+		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		err:               sessionErr,
+	}
+	service := &Service{
+		mySites: mySites, platformGroups: fakePlatformGroupReader{}, inventoryNow: func() time.Time { return now },
+	}
+
+	_, _, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if !attempted {
+		t.Fatal("initial failing inventory request was not attempted")
+	}
+	now = now.Add(adminInventoryRetryDelays[0])
+	mySites.setError(nil)
+	if _, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache)); err != nil || !attempted {
+		t.Fatalf("inventory retry should recover, attempted=%v err=%v", attempted, err)
+	}
+
+	mySites.setError(sessionErr)
+	_, _, attempted = service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if !attempted {
+		t.Fatal("first failure after a success must be attempted immediately")
+	}
+	now = now.Add(adminInventoryRetryDelays[0])
+	_, _, attempted = service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+	if !attempted || mySites.callCount() != 4 {
+		t.Fatalf("success must reset the next failure to the two-minute delay, attempted=%v calls=%d", attempted, mySites.callCount())
+	}
+}
+
+func TestLoadAdminInventory_ConcurrentRequestsUseSingleUpstreamAttempt(t *testing.T) {
+	mySites := &blockingInventoryMySitesReader{
+		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	service := &Service{mySites: mySites, platformGroups: fakePlatformGroupReader{}}
+	released := false
+	defer func() {
+		if !released {
+			close(mySites.release)
+		}
+	}()
+
+	load := func(results chan<- inventoryLoadResult) {
+		inventory, err, attempted := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
+		results <- inventoryLoadResult{inventory: inventory, err: err, attempted: attempted}
+	}
+	firstResult := make(chan inventoryLoadResult, 1)
+	go load(firstResult)
+	select {
+	case <-mySites.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first inventory request did not reach the upstream reader")
+	}
+
+	secondResult := make(chan inventoryLoadResult, 1)
+	go load(secondResult)
+	var second inventoryLoadResult
+	select {
+	case second = <-secondResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent inventory request was not deferred")
+	}
+	if second.attempted || !errors.Is(second.err, errAdminInventoryRetryDeferred) || second.inventory != nil {
+		t.Fatalf("concurrent request must be deferred, result=%+v", second)
+	}
+
+	close(mySites.release)
+	released = true
+	var first inventoryLoadResult
+	select {
+	case first = <-firstResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first inventory request did not finish after release")
+	}
+	if first.err != nil || !first.attempted || first.inventory == nil || mySites.callCount() != 1 {
+		t.Fatalf("exactly one upstream request must complete successfully, result=%+v calls=%d", first, mySites.callCount())
 	}
 }
 

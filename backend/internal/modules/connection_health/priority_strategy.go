@@ -173,7 +173,6 @@ func (s *Service) priorityInventoryForSnapshotWithSources(
 		if groupInventory.err != nil {
 			// 单个分组失败不阻断其它分组排序；目标如果只存在于失败分组，本轮保持原值。
 			inventoryComplete = false
-			log.Printf("[connection-health] priority sync group accounts failed group_id=%s err=%v", group.ID, groupInventory.err)
 			continue
 		}
 		for _, account := range groupInventory.accounts {

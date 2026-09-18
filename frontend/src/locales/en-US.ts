@@ -470,7 +470,7 @@ export default {
         title: 'Needs Attention',
         subtitle: 'Health status and upstream balance issues',
         healthTitle: 'Target Health Issues',
-        healthDescription: '{attention} need attention, {suspended} suspended or disabled',
+        healthDescription: '{attention} need attention, {suspended} in failure cooldown or disabled',
         failuresTitle: 'Probe Failures in 24 Hours',
         failuresDescription: 'Review failure categories and recent state changes',
         upstreamTitle: 'Upstream Balance Issues',
@@ -935,7 +935,7 @@ export default {
           hint: 'Health states are counted by model; pending and unavailable are counted by target. These are not upstream enable/disable states.',
           healthy: 'Healthy Models',
           degraded: 'Degraded Models',
-          suspended: 'Probe Paused',
+          suspended: 'Failure Cooldown',
           observing: 'Recovery Watch',
           recovering: 'Recovering',
           disabled: 'Manually Disabled',
@@ -1097,7 +1097,7 @@ export default {
       stateLabels: {
         healthy: 'Healthy',
         degraded: 'Degraded',
-        suspended: 'Probe Paused',
+        suspended: 'Failure Cooldown',
         observing: 'Observing',
         recovering: 'Recovering',
         disabled: 'Disabled'
@@ -1276,7 +1276,7 @@ export default {
           dailyBudget: 'Caps how many real probe requests this workspace can run per day. Once the budget is used up, real probe requests are skipped to avoid excessive cost — this is expected, not a system error.',
           failureThreshold: 'Consecutive soft failures reaching this count will suspend/degrade the link. Some hard failures (e.g. auth failure) may suspend it immediately without degrading first.',
           successThreshold: 'During the observation window, this many consecutive successful probes are required before the link is considered truly recovered and returns to healthy.',
-          cooldown: 'After a link is suspended, the scheduler will not run automatic probes against it until this cooldown period ends.',
+          cooldown: 'After a link enters failure cooldown, the scheduler waits for both the cooldown and failure backoff to end before probing it again.',
           observation: 'After a manual restore or an automatic recovery flow, the link enters an observation window — consecutive probe results here confirm whether it is actually stable again.',
           recoveryStep: 'During recovery, each successful probe raises local weight by this percentage step, instead of jumping straight to 100%.',
           autoDegrade: 'When enabled, probe results drive the health state machine and adjust local routing weight. When disabled, probe results are only recorded — state and weight never change automatically.',
@@ -1315,7 +1315,7 @@ export default {
             },
             cooldownObservation: {
               title: '7. Cooldown and observation',
-              description: 'Once a target/model is suspended, it enters the policy\'s configured cooldown period, during which the scheduler will not run automatic probes against it. After cooldown ends — or after an admin manually restores it — the target enters an observation phase: consecutive probe results during this window determine whether the target has genuinely stabilized, and only enough consecutive successes to reach the "recovery success threshold" moves it back to healthy.'
+              description: 'Once a target/model enters failure cooldown, the scheduler waits for both the policy cooldown and failure backoff to end, then runs another automatic probe. The target enters observation only when that probe succeeds, or when an admin restores it manually; another failure keeps it in cooldown until the next retry. During observation, only enough consecutive successes to reach the "recovery success threshold" moves it back to healthy.'
             },
             autoDegradeVsRemoteAction: {
               title: '8. Auto Degrade vs. Auto Remote Action',
