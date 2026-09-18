@@ -42,9 +42,10 @@ const (
 	ProviderCustom    = "custom"
 )
 
-// PriorityMode 控制策略是否同步上游账号/渠道的调度优先级。空值和 none 都保持旧行为；
+// PriorityMode 控制策略是否按倍率同步上游账号/渠道的调度优先级。空值和 none 不做日常排序；
 // multiplier 表示在健康状态优先的前提下，按 admin 分组原始倍率从低到高排序，并把排序结果
-// 映射为上游平台的 priority。使用字符串常量是为了兼容数据库中未来扩展其它排序模式。
+// 映射为上游平台的 priority。Sub2API 的健康远端动作是例外：它永远禁止关闭账号，
+// 故障时只会临时降低 priority，即使 PriorityMode 为 none 也会执行该保护动作。
 const (
 	PriorityModeNone       = "none"
 	PriorityModeMultiplier = "multiplier"
@@ -124,9 +125,9 @@ type GroupTargetExclusion struct {
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
-// PrioritySyncState 记录倍率策略接管目标前的优先级和最后一次系统写入值。同步前若发现上游
-// 当前值不等于 LastAppliedPriority，说明管理员在上游做过人工修改；系统标记 Conflict 并停止
-// 覆盖。策略停止管理后，仅在上游值仍等于最后写入值时恢复 OriginalPriority。
+// PrioritySyncState 记录倍率排序或 Sub2API 健康阻断接管目标前的优先级，以及最后一次系统
+// 写入值。同步前若发现上游当前值不等于 LastAppliedPriority，说明管理员做过人工修改；系统
+// 标记 Conflict 并停止覆盖。停止管理后，仅在上游值仍等于最后写入值时恢复 OriginalPriority。
 type PrioritySyncState struct {
 	UserID              string `json:"-"`
 	AdminAccountID      string `json:"-"`

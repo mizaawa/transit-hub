@@ -164,6 +164,37 @@ func TestAdminGroups_TargetIDProbeAvailableAndModelHealth(t *testing.T) {
 	}
 }
 
+func TestAdminGroups_HidesHealthOnlyPriorityMultiplierSentinel(t *testing.T) {
+	repo := newFakeRepository()
+	targetID := "sub2api:ws1:acc-1"
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		EffectiveMultiplier: -1,
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Name: "sub2-account", Status: "active"}},
+		},
+	}
+	service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+		t.Fatalf("expected one account, got %+v", groups)
+	}
+	account := groups[0].Accounts[0]
+	if !account.PriorityManaged {
+		t.Fatalf("health-only priority sentinel must still report managed: %+v", account)
+	}
+	if account.EffectiveMultiplier != nil {
+		t.Fatalf("health-only priority sentinel must not be exposed as a multiplier: %+v", account.EffectiveMultiplier)
+	}
+}
+
 // TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier 验证“上游 API Key 倍率”来自当前
 // API Key 所在的上游分组，而不是连接记录里的历史分组或 Sub2API admin 账号自身倍率。
 // 未建立真实对接关联、或同一账号存在无法全部解析的连接时，必须保持未知。

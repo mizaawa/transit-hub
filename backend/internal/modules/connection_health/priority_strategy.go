@@ -8,6 +8,15 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
+const (
+	// Sub2API 数值越小越优先。该值只是健康阻断档的下限；实际写入值还必须
+	// 不小于当前 workspace inventory 中的最大 priority，避免反向提升故障账号。
+	sub2APIBlockedPriority = 10000
+	// PrioritySyncState 原本只存储倍率值。负值用作健康降级接管的内部标记，
+	// 不会作为倍率暴露给前端，也不参与排序。
+	healthPriorityMultiplierSentinel = -1
+)
+
 // TargetPriorityActioner 是倍率排序策略对 upstream 模块的唯一写依赖。真实实现根据 session
 // 平台更新 New API channel 或 Sub2API account 的 priority，并由 upstream 模块保证字段级写入安全。
 type TargetPriorityActioner interface {
@@ -23,8 +32,9 @@ type priorityTargetInventory struct {
 	currentPriority  int
 }
 
-// syncMultiplierPriorities 在每轮探活前同步上游优先级。普通倍率策略仍然「健康优先、倍率次之」，
-// 仅倍率策略则完全忽略探活状态。它故意与 job 生成分开，确保未到探活时间的目标也能更新顺序。
+// syncMultiplierPriorities 同步上游优先级。普通倍率策略仍然「健康优先、倍率次之」，
+// 仅倍率策略完全忽略探活状态。Sub2API 的健康远端动作也在这里处理：
+// 本来应关闭的账号只降到最低 priority，不修改 active/inactive。
 func (s *Service) syncMultiplierPriorities(
 	ctx context.Context,
 	policies []Policy,
@@ -180,6 +190,11 @@ func (s *Service) priorityInventoryForSnapshotWithSources(
 					item.currentPriority = *account.Priority
 				}
 				inventory[targetID] = item
+			} else if item.account.Priority == nil && account.Priority != nil {
+				// The same account can be returned by several groups. A partial row must
+				// not hide a usable current priority from another occurrence.
+				item.account.Priority = account.Priority
+				item.currentPriority = *account.Priority
 			}
 			if manualMultiplier := accountMultiplierForTarget(manualMultipliers, targetID); manualMultiplier != nil {
 				// The same target can appear in several groups. Keep one validated manual
@@ -236,10 +251,17 @@ func (s *Service) syncWorkspacePriorities(
 	}
 
 	managed := make(map[string]*priorityTargetInventory)
+	healthBlocked := make(map[string]struct{})
 	missingMultiplier := make(map[string]struct{})
 	distinctMultipliers := make([]float64, 0)
 	seenMultipliers := make(map[float64]struct{})
 	for targetID, item := range inventory {
+		if session.Platform == upstream.PlatformSub2API && item.account.Priority == nil {
+			// A target we cannot safely snapshot must not affect the rank assigned
+			// to other targets in the same workspace either.
+			missingMultiplier[targetID] = struct{}{}
+			continue
+		}
 		if !hasMultiplierPriorityPolicy(item.policies) {
 			continue
 		}
@@ -269,28 +291,91 @@ func (s *Service) syncWorkspacePriorities(
 	for _, state := range syncStates {
 		storedByTarget[state.TargetID] = state
 	}
+	blockedPriority := sub2APIBlockedPriority
+	if session.Platform == upstream.PlatformSub2API {
+		for _, item := range inventory {
+			if item.account.Priority != nil && *item.account.Priority > blockedPriority {
+				blockedPriority = *item.account.Priority
+			}
+		}
+		for _, stored := range syncStates {
+			if stored.EffectiveMultiplier == healthPriorityMultiplierSentinel && stored.LastAppliedPriority > blockedPriority {
+				// Never move an already blocked account back toward the front merely
+				// because another account's high priority disappeared or decreased.
+				blockedPriority = stored.LastAppliedPriority
+			}
+		}
+	}
+
+	// Sub2API 分组探活不再关闭账号。健康阻断独立于倍率排序并拥有更高优先级：
+	// 一旦进入观察、恢复或阻断状态，保持最低调度档直到全部受控模型恢复健康。
+	if session.Platform == upstream.PlatformSub2API {
+		for targetID, item := range inventory {
+			eligible, allHealthy, shouldBlock := sub2APIRemotePriorityStatus(item, statesByTarget[targetID])
+			stored, exists := storedByTarget[targetID]
+			wasHealthBlocked := exists && stored.EffectiveMultiplier == healthPriorityMultiplierSentinel
+			if item.account.Priority == nil {
+				// Without the upstream value there is no safe original-value snapshot or
+				// manual-conflict check. Hold both multiplier and health management.
+				delete(managed, targetID)
+				missingMultiplier[targetID] = struct{}{}
+				continue
+			}
+			if !inventoryComplete && (wasHealthBlocked || (eligible && shouldBlock)) {
+				// A partial workspace cannot establish the true lowest scheduling tier.
+				// Preserve any existing checkpoint and wait for a complete inventory.
+				delete(managed, targetID)
+				missingMultiplier[targetID] = struct{}{}
+				continue
+			}
+			if !eligible {
+				if wasHealthBlocked {
+					// 远端动作被关闭或解绑后，不能让倍率缺失等待态把健康阻断永久保留。
+					delete(missingMultiplier, targetID)
+				}
+				continue
+			}
+			if shouldBlock || (wasHealthBlocked && !allHealthy) {
+				managed[targetID] = item
+				healthBlocked[targetID] = struct{}{}
+				delete(missingMultiplier, targetID)
+				continue
+			}
+			if allHealthy && wasHealthBlocked {
+				// 倍率来源恰好在恢复期间消失时，也不能让故障档 10000 永久残留。
+				delete(missingMultiplier, targetID)
+			}
+		}
+	}
 
 	for targetID, item := range managed {
-		multiplier := item.multipliers[0]
-		activeModels := make(map[string]struct{})
-		if !hasMultiplierOnlyPolicy(item.policies) {
-			for _, spec := range candidateModelSpecs(item.target.Models, item.policies) {
-				// 关闭自动降级后模型状态不会继续推进，因此不能让历史 suspended/degraded
-				// 状态永久影响倍率排序。倍率本身继续生效，但健康层级回到未配置档。
-				if spec.policy.AutoDegradeEnabled {
-					activeModels[spec.modelName] = struct{}{}
+		multiplier := float64(healthPriorityMultiplierSentinel)
+		desired := blockedPriority
+		if _, blockedByHealth := healthBlocked[targetID]; !blockedByHealth {
+			multiplier = item.multipliers[0]
+			activeModels := make(map[string]struct{})
+			if !hasMultiplierOnlyPolicy(item.policies) {
+				for _, spec := range candidateModelSpecs(item.target.Models, item.policies) {
+					// 关闭自动降级后模型状态不会继续推进，因此不能让历史 suspended/degraded
+					// 状态永久影响倍率排序。倍率本身继续生效，但健康层级回到未配置档。
+					if spec.policy.AutoDegradeEnabled {
+						activeModels[spec.modelName] = struct{}{}
+					}
 				}
 			}
-		}
-		activeStates := make([]ConnectionHealthState, 0, len(activeModels))
-		for _, state := range statesByTarget[targetID] {
-			if _, active := activeModels[state.ModelName]; active {
-				activeStates = append(activeStates, state)
+			activeStates := make([]ConnectionHealthState, 0, len(activeModels))
+			for _, state := range statesByTarget[targetID] {
+				if _, active := activeModels[state.ModelName]; active {
+					activeStates = append(activeStates, state)
+				}
+			}
+			desired = desiredManagedPriorityForPlatformWithExpected(
+				session.Platform, activeStates, multiplierRank[multiplier], len(activeModels),
+			)
+			if session.Platform == upstream.PlatformSub2API && desired == sub2APIBlockedPriority {
+				desired = blockedPriority
 			}
 		}
-		desired := desiredManagedPriorityForPlatformWithExpected(
-			session.Platform, activeStates, multiplierRank[multiplier], len(activeModels),
-		)
 		stored, exists := storedByTarget[targetID]
 		if !exists {
 			stored = PrioritySyncState{
@@ -436,13 +521,13 @@ func desiredManagedPriorityForPlatformWithExpected(platform upstream.Platform, s
 }
 
 // desiredSub2APIManagedPriority 使用 Sub2API「数值越小越优先」的原生语义，并为不同健康
-// 状态预留互不重叠的区间：健康 1-9、恢复中 10-99、降级/观察 100-999、待配置
+// 状态预留互不重叠的区间：健康 1-9、恢复中 10-99、降级 100-999、待配置
 // 1000-9999、暂停/禁用 10000。同一状态内 multiplierRank 越小，priority 越小。
 // rank 超出区间容量时在区间末尾并列，避免价格排序跨越健康状态边界。
 func desiredSub2APIManagedPriority(states []ConnectionHealthState, multiplierRank int, expectedModels int) int {
 	for _, state := range states {
-		if state.State == StateDisabled || state.State == StateSuspended {
-			return 10000
+		if state.State == StateDisabled || state.State == StateSuspended || state.State == StateObserving {
+			return sub2APIBlockedPriority
 		}
 	}
 	if len(states) < expectedModels {
@@ -461,6 +546,40 @@ func desiredSub2APIManagedPriority(states []ConnectionHealthState, multiplierRan
 		}
 	}
 	return sub2APIPriorityWithinBand(base, nextBase, multiplierRank)
+}
+
+// sub2APIRemotePriorityStatus 把当前会真正启用远端动作的模型聚合为账号级决策。
+// 候选策略的去重/安全优先级与 reconcileTargetRemoteAction 完全一致：同一模型
+// 被一条关闭远端动作的策略覆盖时，不能被另一条策略绕过保护。
+func sub2APIRemotePriorityStatus(item *priorityTargetInventory, states []ConnectionHealthState) (eligible bool, allHealthy bool, shouldBlock bool) {
+	controlledModels := make(map[string]struct{})
+	for _, spec := range candidateModelSpecs(item.target.Models, item.policies) {
+		if policyRemoteActionEnabled(spec.policy) {
+			controlledModels[spec.modelName] = struct{}{}
+		}
+	}
+	if len(controlledModels) == 0 {
+		return false, false, false
+	}
+
+	seen := make(map[string]struct{}, len(controlledModels))
+	allHealthy = true
+	for _, state := range states {
+		if _, controlled := controlledModels[state.ModelName]; !controlled {
+			continue
+		}
+		seen[state.ModelName] = struct{}{}
+		if state.State != StateHealthy {
+			allHealthy = false
+		}
+		if state.State == StateSuspended || state.State == StateObserving || state.State == StateRecovering || state.State == StateDisabled || state.CurrentWeight <= 0 {
+			shouldBlock = true
+		}
+	}
+	if len(seen) != len(controlledModels) {
+		allHealthy = false
+	}
+	return true, allHealthy, shouldBlock
 }
 
 func sub2APIPriorityWithinBand(base int, nextBase int, multiplierRank int) int {

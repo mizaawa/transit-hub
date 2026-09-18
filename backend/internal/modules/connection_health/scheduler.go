@@ -153,14 +153,30 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		return
 	}
 
-	// 优先级同步和探活使用同一份有效策略关系。优先级写入失败只记录日志，不阻断探活。
-	inventoryCache := make(adminInventoryCache)
-	s.syncMultiplierPrioritiesWithCache(ctx, policies, assignments, groupAssignments, exclusions, priorityStates, inventoryCache)
-	s.restoreUnmanagedTargetActions(ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, inventoryCache)
+	// 先根据上一轮健康状态同步 priority，避免历史修复把旧版关闭的 Sub2API
+	// 账号重新启用后，在整轮探活期间以原高优先级接收流量。
+	preSyncInventoryCache := make(adminInventoryCache)
+	s.syncMultiplierPrioritiesWithCache(
+		ctx, policies, assignments, groupAssignments, exclusions, priorityStates, preSyncInventoryCache,
+	)
+	refreshedPriorityStates, refreshErr := s.repo.ListAllPrioritySyncStates(ctx)
+	if refreshErr != nil {
+		// NewAPI cleanup and normal probes may still proceed. Sub2API legacy restores
+		// that need a confirmed health-priority takeover will remain deferred.
+		log.Printf("[connection-health] scheduler refresh priority states before legacy restore failed: %v", refreshErr)
+		refreshedPriorityStates = nil
+	}
+
+	// status 恢复必须重新读取远端 priority，以确认上面的接管写入已经可见；探活
+	// job 可以复用这份快照。探活后的同步仍需再次刷新，以看到期间的人工修改。
+	probeInventoryCache := make(adminInventoryCache)
+	s.restoreUnmanagedTargetActions(
+		ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, refreshedPriorityStates, probeInventoryCache,
+	)
 	if len(policies) == 0 {
 		return
 	}
-	jobs := s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, inventoryCache)
+	jobs := s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, probeInventoryCache)
 	if len(jobs) == 0 {
 		return
 	}
@@ -168,7 +184,6 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	globalSem := make(chan struct{}, globalProbeConcurrency)
 	workspaceSemaphores := make(map[string]chan struct{})
 	var wg sync.WaitGroup
-
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
 		wsSem, ok := workspaceSemaphores[wsKey]
@@ -183,6 +198,17 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		go s.runAdminProbeJob(ctx, j, globalSem, wsSem, &wg)
 	}
 	wg.Wait()
+
+	// 本轮探活可能产生新的阻断状态。重新读取同步快照和远端 inventory，确保冲突
+	// 检测看到探活期间的人工修改，并在同一轮只调整 priority、不修改 Sub2API status。
+	priorityStates, err = s.repo.ListAllPrioritySyncStates(ctx)
+	if err != nil {
+		log.Printf("[connection-health] scheduler refresh priority sync states failed: %v", err)
+		return
+	}
+	s.syncMultiplierPrioritiesWithCache(
+		ctx, policies, assignments, groupAssignments, exclusions, priorityStates, make(adminInventoryCache),
+	)
 }
 
 // runAdminProbeJob 处理单个目标的到期任务：先解析一次凭据；凭据不可用时对每个到期模型记录

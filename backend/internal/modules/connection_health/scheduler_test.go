@@ -3,11 +3,153 @@ package connection_health
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
+
+type mutableSchedulerPriorityReader struct {
+	mu         sync.Mutex
+	priority   int
+	listCalls  int
+	credential upstream.ProbeCredential
+}
+
+func (r *mutableSchedulerPriorityReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
+	multiplier := 0.5
+	return []upstream.AdminGroupInfo{{ID: "g1", Name: "vip", Multiplier: &multiplier}}, nil
+}
+
+func (r *mutableSchedulerPriorityReader) ListAdminGroupAccounts(session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.listCalls++
+	priority := r.priority
+	return []upstream.AdminGroupAccountInfo{{
+		ID: "acc-1", Name: "account", Status: "active", Priority: &priority, Models: "gpt-4o",
+	}}, nil
+}
+
+func (r *mutableSchedulerPriorityReader) ResolveProbeCredential(session upstream.Session, account upstream.AdminGroupAccountInfo) (upstream.ProbeCredential, error) {
+	return r.credential, nil
+}
+
+func (r *mutableSchedulerPriorityReader) setPriority(priority int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.priority = priority
+}
+
+func (r *mutableSchedulerPriorityReader) accountListCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listCalls
+}
+
+func TestRunSchedulerTick_ManualPriorityChangeDuringProbeBecomesConflict(t *testing.T) {
+	reader := &mutableSchedulerPriorityReader{priority: 1}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reader.setPriority(23)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	reader.credential = upstream.ProbeCredential{BaseURL: server.URL, Key: "probe-key"}
+
+	repo := newFakeRepository()
+	repo.policies = []Policy{{
+		ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		PriorityMode: PriorityModeMultiplier, AutoDegradeEnabled: true,
+		FailureThreshold: 3, SuccessThreshold: 2, DailyProbeBudget: 1000,
+		ModelTargets: []ModelTarget{{ModelName: "gpt-4o", ProviderFamily: ProviderOpenAI, Enabled: true, MaxProbeTokens: 1}},
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: "p1",
+	}}
+	targetID := "sub2api:ws1:acc-1"
+	repo.states[targetID] = map[string]ConnectionHealthState{
+		"gpt-4o": {
+			ConnectionID: targetID, ModelName: "gpt-4o", UserID: "user1", AdminAccountID: "ws1",
+			State: StateHealthy, CurrentWeight: 100,
+		},
+	}
+	priorityActions := &fakeTargetPriorityActioner{}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		dispatcher: noopRemoteActionRunner{}, probeRunner: NewRealProbeRunner(),
+		platformGroups: reader, priorityActions: priorityActions,
+	}
+
+	service.runSchedulerTick(context.Background())
+
+	if len(priorityActions.calls) != 0 {
+		t.Fatalf("manual priority change during probe must not be overwritten, got %+v", priorityActions.calls)
+	}
+	stored, ok := repo.priorityStates["user1|ws1|"+targetID]
+	if !ok || !stored.Conflict || stored.LastConflictPriority == nil || *stored.LastConflictPriority != 23 {
+		t.Fatalf("manual priority change must be recorded as a conflict, got %+v", stored)
+	}
+	if calls := reader.accountListCalls(); calls < 2 {
+		t.Fatalf("post-probe sync must reload upstream inventory, account list calls=%d", calls)
+	}
+}
+
+func TestRunSchedulerTick_Sub2APIHardFailureLowersPriorityInSameTick(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer server.Close()
+
+	repo := newFakeRepository()
+	repo.policies = []Policy{{
+		ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		AutoDegradeEnabled: true, AutoRemoteActionEnabled: true,
+		FailureThreshold: 3, SuccessThreshold: 2, DailyProbeBudget: 1000,
+		ModelTargets: []ModelTarget{{ModelName: "gpt-4o", ProviderFamily: ProviderOpenAI, Enabled: true, MaxProbeTokens: 1}},
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: "p1",
+	}}
+	priority := 7
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Name: "account", Status: "active", Priority: &priority, Models: "gpt-4o"}},
+		},
+		credByAccount: map[string]upstream.ProbeCredential{
+			"acc-1": {BaseURL: server.URL, Key: "probe-key"},
+		},
+	}
+	priorityActions := &fakeTargetPriorityActioner{}
+	statusActions := &fakePlatformActioner{}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		dispatcher: newRemoteActionDispatcher(nil, nil, statusActions), probeRunner: NewRealProbeRunner(),
+		platformGroups: reader, priorityActions: priorityActions,
+	}
+
+	service.runSchedulerTick(context.Background())
+
+	targetID := "sub2api:ws1:acc-1"
+	if state := repo.states[targetID]["gpt-4o"]; state.State != StateSuspended {
+		t.Fatalf("hard failure must still suspend local health state, got %+v", state)
+	}
+	if len(statusActions.sub2APICalls) != 0 {
+		t.Fatalf("scheduler must never disable a Sub2API account, got %+v", statusActions.sub2APICalls)
+	}
+	if len(priorityActions.calls) != 1 || priorityActions.calls[0].targetID != "acc-1" || priorityActions.calls[0].priority != sub2APIBlockedPriority {
+		t.Fatalf("hard failure must lower priority in the same tick, got %+v", priorityActions.calls)
+	}
+	stored, ok := repo.priorityStates["user1|ws1|"+targetID]
+	if !ok || stored.OriginalPriority != priority || stored.LastAppliedPriority != sub2APIBlockedPriority {
+		t.Fatalf("priority ownership snapshot must preserve the original value, got %+v", stored)
+	}
+}
 
 func TestIsDue_NeverProbedIsDue(t *testing.T) {
 	repo := newFakeRepository()

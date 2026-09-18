@@ -874,7 +874,7 @@ export default {
       title: 'Group Health',
       subtitle: 'Independent lightweight probing of accounts/channels inside the current admin workspace groups, with health monitoring and automatic degrade/restore.',
       adminSubtitle: 'Shows all groups under the current admin workspace. Click the account count to view accounts/channels and their independent probe status.',
-      simplifiedSubtitle: 'Configure probes, automatic failover, and traffic priority around admin upstream groups. New accounts and channels inherit their group policy automatically.',
+      simplifiedSubtitle: 'Configure probes, automatic health degradation, and upstream traffic control by admin upstream group. Sub2API changes priority only and never disables accounts; NewAPI continues to update channel weight/status. New accounts and channels inherit the group policy automatically.',
       summaryLabel: 'Group health summary',
       groupListLabel: 'Upstream group list',
       refresh: 'Refresh',
@@ -1002,7 +1002,7 @@ export default {
           options: {
             multiplier: {
               title: 'Multiplier Priority',
-              description: 'Among healthy targets, a lower multiplier gets higher upstream priority. Failed targets still degrade first.'
+              description: 'Among healthy targets, a lower multiplier gets higher upstream priority. When health becomes blocking, Sub2API only lowers priority and restores it after full recovery; NewAPI updates channel weight/status.'
             },
             multiplierOnly: {
               title: 'Multiplier Only',
@@ -1010,11 +1010,11 @@ export default {
             },
             stable: {
               title: 'Stability First',
-              description: 'Auto-probe and disable or restore failed targets using platform capabilities without changing routine priority.'
+              description: 'Auto-probe without routine multiplier sorting. When health becomes blocking, Sub2API only lowers priority and restores it after full recovery; NewAPI updates channel weight/status.'
             },
             monitor: {
               title: 'Monitor Only',
-              description: 'Record health and events without upstream disable, restore, or priority changes.'
+              description: 'Record health and events without changing upstream priority, weight, or status.'
             },
             existing: {
               title: 'Use Existing Policies',
@@ -1030,7 +1030,7 @@ export default {
           },
           providerLabel: 'Model Provider',
           remoteActionLabel: 'Run Upstream Actions',
-          remoteActionHelp: 'Automatically disable or restore targets on failure and recovery when the platform supports it',
+          remoteActionHelp: 'Sub2API never disables accounts: it only lowers priority for blocking health and restores it after full recovery; NewAPI updates channel weight/status',
           multiplierOnlyTitle: 'Sync Multiplier Priority Only',
           multiplierOnlyHelp: 'The scheduler reads current group multipliers about every 30 seconds. Lower multipliers receive higher priority. No models or probe credentials are required.',
           multiplierMissingTitle: 'Selected accounts have no valid multiplier source',
@@ -1048,7 +1048,7 @@ export default {
           remoteAction: 'Upstream Automation',
           enabled: 'Enabled',
           disabled: 'Disabled',
-          multiplierRule: 'Multiplier rule: health outranks price; a target in multiple groups uses the lowest multiplier; lower multipliers receive higher upstream priority. If a manual change is detected, automation stops and reports a conflict.',
+          multiplierRule: 'Multiplier rule: health outranks price; a target in multiple groups uses the lowest multiplier; lower multipliers receive higher upstream priority. With upstream actions enabled, Sub2API only lowers priority for blocking health and restores the original priority after full recovery; it never disables accounts. NewAPI continues to update channel weight/status. If a manual change is detected, automation stops and reports a conflict.',
           multiplierOnlyRule: 'Multiplier-only rule: health state is ignored and no model probes run. Targets in multiple groups use the lowest multiplier. Disabling or unbinding restores the original priority; manual edits remain protected by conflict detection.'
         },
         back: 'Back',
@@ -1254,13 +1254,13 @@ export default {
         autoDegradeLabel: 'Auto Degrade',
         autoDegradeHelp: 'Automatically lower local weight or suspend a link once failures reach the threshold.',
         autoRemoteActionLabel: 'Auto Remote Action',
-        autoRemoteActionHelp: 'NewAPI updates channel weight/status, while Sub2API toggles the admin account active/inactive. When disabled, health results are recorded without upstream calls.',
-        priorityModeLabel: 'Upstream Traffic Priority',
+        autoRemoteActionHelp: 'NewAPI updates channel weight/status. Sub2API never sets an admin account to inactive; it only lowers upstream priority for blocking health and restores it after full recovery. When disabled, health transitions make no upstream call; separately enabled multiplier sorting may still sync priority.',
+        priorityModeLabel: 'Routine Priority Sorting',
         priorityModes: {
-          none: 'Keep Upstream Values',
+          none: 'No Multiplier Sorting',
           multiplier: 'Sort by Group Multiplier'
         },
-        priorityModeHelp: 'Multiplier sorting favors lower-cost upstream targets while they are healthy. Failed targets always degrade before price ordering applies.',
+        priorityModeHelp: 'Multiplier sorting favors lower-cost upstream targets while they are healthy. Auto remote actions handle blocking health separately: Sub2API temporarily lowers priority, while NewAPI updates channel weight/status.',
         multiplierOnlySummaryTitle: 'Lower Multiplier, Higher Priority',
         multiplierOnlySummary: 'About every 30 seconds, the scheduler reads current group multipliers and syncs upstream priority. It never resolves probe credentials, requests models, consumes probe budget, degrades health, or runs remote health actions. Manual priority edits stop automatic overwrites.',
         providerLabel: 'Model Provider',
@@ -1280,8 +1280,8 @@ export default {
           observation: 'After a manual restore or an automatic recovery flow, the link enters an observation window — consecutive probe results here confirm whether it is actually stable again.',
           recoveryStep: 'During recovery, each successful probe raises local weight by this percentage step, instead of jumping straight to 100%.',
           autoDegrade: 'When enabled, probe results drive the health state machine and adjust local routing weight. When disabled, probe results are only recorded — state and weight never change automatically.',
-          autoRemoteAction: 'When enabled, supported upstream actions run when the state machine triggers degrade/recovery: Sub2API toggles the admin account active/inactive, and NewAPI updates channel weight/status. When disabled, only probe and state results are recorded.',
-          priorityMode: 'Group multiplier sorting maps lower multipliers to higher upstream priority. Health tier outranks price; targets in multiple groups use the lowest multiplier; automation stops when it detects a manual priority change.'
+          autoRemoteAction: 'When enabled, platform actions run when the state machine must block or restore upstream traffic. Sub2API never sets an admin account to inactive: it only lowers upstream priority while blocked and restores the original priority after the target fully recovers. NewAPI updates channel weight/status. When disabled, health transitions only record results; separately enabled multiplier sorting may still sync priority.',
+          priorityMode: 'Group multiplier sorting manages routine priority only: lower multipliers map to higher priority, health tier outranks price, and targets in multiple groups use the lowest multiplier. Blocking health actions are handled separately; automation stops when it detects a manual priority change.'
         },
         runFlow: {
           buttonLabel: 'How it works',
@@ -1319,7 +1319,7 @@ export default {
             },
             autoDegradeVsRemoteAction: {
               title: '8. Auto Degrade vs. Auto Remote Action',
-              description: 'Auto Degrade only affects the internal state machine and local display weight; it never calls any upstream platform API, so it is low-risk. Auto Remote Action only calls upstream when the policy explicitly enables it AND the state machine decides a remote action is warranted: for NewAPI linked-channel probing this changes channel weight/status; in the current group-health independent probing path, Sub2API targets toggle the admin account active/inactive (priority is never adjusted), while the NewAPI target dimension does not implement remote actions yet and is recorded as unsupported without calling upstream. When a policy does not enable Auto Remote Action, both paths only record "skipped" and never call any upstream API.'
+              description: 'Auto Degrade only affects the internal state machine and local display weight; it never calls an upstream platform API. Auto Remote Action calls upstream only when the policy explicitly enables it and the state machine must block or restore traffic: NewAPI updates channel weight/status; Sub2API never sets an admin account to inactive, only lowers upstream priority while blocked, and restores the original priority only after the target fully recovers. When Auto Remote Action is disabled, health transitions only record "skipped"; separately enabled multiplier sorting may still synchronize priority.'
             },
             manualProbe: {
               title: '9. Manual probing',

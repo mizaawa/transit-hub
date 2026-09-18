@@ -405,8 +405,8 @@ func (s *Service) findAdminTarget(ctx context.Context, session upstream.Session,
 // 远端动作规则：
 //   - 自动降级或自动远端动作任一关闭时，即使状态机判定需要远端动作，也只记
 //     RemoteActionSkippedIndependentProbe，绝不调用上游（与旧行为一致）。
-//   - 两个开关都开启且 target.Platform 是 sub2api 时，真实调用
-//     dispatcher.DegradeTarget/RestoreTarget 切换 sub2api 账号 active/inactive。
+//   - Sub2API 永不切换账号 active/inactive；调度器的 priority 同步在阻断状态下
+//     将账号降到最低优先级，并在全部受控模型健康后恢复原值。
 //   - New API target 按 currentWeight 更新 channel weight/status，实现逐步恢复。
 //
 // session 来自调用方（ProbeTarget 的 resolveManualTarget / 调度器 job 的 RequireSession），

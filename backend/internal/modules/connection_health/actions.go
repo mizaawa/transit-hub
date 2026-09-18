@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
@@ -26,8 +27,8 @@ type RemoteActionRunner interface {
 // 避免直接依赖 PlatformService 的其余大量方法。
 type PlatformActioner interface {
 	UpdateNewAPIChannelWeightStatus(session upstream.Session, channelID string, weight int, status int) error
-	// UpdateSub2APIAdminAccountStatus 切换 sub2api 转发账号的启用状态（active/inactive）。
-	// 第一期远端动作只做状态开关，不做 priority 权重映射（见 dispatcher 顶部说明）。
+	// UpdateSub2APIAdminAccountStatus 只用于升级后恢复旧版健康监控已经关闭的账号。
+	// 新的降级/恢复决策禁止修改 Sub2API status，只能通过 priority 同步器调整调度顺序。
 	UpdateSub2APIAdminAccountStatus(session upstream.Session, accountID string, status string) error
 }
 
@@ -39,16 +40,8 @@ type SessionProvider interface {
 // RemoteActionUnsupported 是没有已验证安全接口时的统一标记，绝不发明未经证实的远端请求。
 const RemoteActionUnsupported = "unsupported"
 
-// Sub2API 账号状态切换的远端动作标记：第一期远端动作只做账号 active/inactive 开关，
-// 不做 priority 权重映射——sub2api 的 priority 是调度优先级，不等同于 NewAPI 的 weight，
-// 强行映射 CurrentWeight(0-100) -> priority 会改变调度语义，线上风险较高（详见任务书）。
-// 后续如需要 priority 阶梯恢复，需要单独的产品规则，不在本次改造范围内。
-//
-// *Failed 常量专门用来和 RemoteActionUnsupported 区分开：unsupported 表示这个平台/维度本身
-// 没有已验证的远端动作能力（不会尝试调用上游）；*Failed 表示 Sub2API 已支持该动作、也确实
-// 发起了调用，但 UpdateSub2APIAdminAccountStatus 返回了 error（GET/PUT 失败、鉴权失败、
-// 响应结构异常等）。把真实失败折叠成 unsupported 会让排查者误以为「这个平台不支持」，
-// 从而错过真正的上游调用故障。
+// Sub2API status 标记仅保留用于识别旧版历史事件和执行一次性恢复。
+// 当前监控路径不得再产生 inactive/active 动作。
 const (
 	RemoteActionSub2APIStatusInactive       = "sub2api_account_status_inactive"
 	RemoteActionSub2APIStatusActive         = "sub2api_account_status_active"
@@ -58,8 +51,8 @@ const (
 )
 
 // remoteActionDispatcher 按连接所在上游站点的平台类型（new-api / sub2api）分派远端动作。
-// new-api 通过 admin channel 的 weight/status 实现降级/恢复；sub2api 通过 admin account 的
-// status（active/inactive）实现降级/恢复，不涉及 priority。
+// NewAPI 保留 channel weight/status 动作；Sub2API 状态写入在这一层被硬性禁止，
+// 分组监控的降级只能由 priority_strategy.go 的带快照同步器执行。
 type remoteActionDispatcher struct {
 	sites    SiteLookup
 	sessions SessionProvider
@@ -137,12 +130,7 @@ func (d *remoteActionDispatcher) DegradeTarget(ctx context.Context, session upst
 	if target.Platform != string(upstream.PlatformSub2API) {
 		return RemoteActionUnsupported, nil
 	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, "inactive"); err != nil {
-		// 已经进入 sub2api 支持的动作分支，真的发起了调用但失败了：必须和「不支持」区分开，
-		// 否则排查者会误以为 sub2api 从不支持这个动作。
-		return RemoteActionSub2APIStatusInactiveFailed, err
-	}
-	return RemoteActionSub2APIStatusInactive, nil
+	return RemoteActionUnsupported, nil
 }
 
 func (d *remoteActionDispatcher) RestoreTarget(ctx context.Context, session upstream.Session, target AdminProbeTarget, state ConnectionHealthState) (remoteAction string, err error) {
@@ -169,10 +157,7 @@ func (d *remoteActionDispatcher) RestoreTarget(ctx context.Context, session upst
 	if target.Platform != string(upstream.PlatformSub2API) {
 		return RemoteActionUnsupported, nil
 	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, "active"); err != nil {
-		return RemoteActionSub2APIStatusActiveFailed, err
-	}
-	return RemoteActionSub2APIStatusActive, nil
+	return RemoteActionUnsupported, nil
 }
 
 // ApplyTargetState 写入账号级聚合决策。旧 real_connections 仍使用 Degrade/Restore；新的
@@ -207,18 +192,30 @@ func (d *remoteActionDispatcher) ApplyTargetState(ctx context.Context, session u
 	if target.Platform != string(upstream.PlatformSub2API) {
 		return RemoteActionUnsupported, nil
 	}
-	resolvedStatus := "active"
-	if status == "inactive" || status == "disabled" || status == "2" {
-		resolvedStatus = "inactive"
-	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, resolvedStatus); err != nil {
-		if resolvedStatus == "inactive" {
-			return RemoteActionSub2APIStatusInactiveFailed, err
+	return RemoteActionUnsupported, nil
+}
+
+// restoreLegacySub2APIStatus 只处理升级前已由本模块写入的 status 快照。
+// 新决策路径不能调用它；它的唯一用途是重新启用系统曾经关闭的账号。
+func (d *remoteActionDispatcher) restoreLegacySub2APIStatus(session upstream.Session, target AdminProbeTarget, status string) (remoteAction string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			remoteAction = RemoteActionUnsupported
+			err = fmt.Errorf("restore legacy sub2api status panic recovered: %v", r)
 		}
-		return RemoteActionSub2APIStatusActiveFailed, err
+	}()
+	if target.Platform != string(upstream.PlatformSub2API) || target.AccountID == "" {
+		return RemoteActionUnsupported, nil
 	}
-	if resolvedStatus == "inactive" {
-		return RemoteActionSub2APIStatusInactive, nil
+	// This compatibility path may only undo a status write made by an older
+	// version. Never let malformed or unexpected historical data turn it into
+	// another account-disable path.
+	if strings.ToLower(strings.TrimSpace(status)) != "active" {
+		return RemoteActionUnsupported, nil
+	}
+	resolvedStatus := "active"
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, resolvedStatus); err != nil {
+		return RemoteActionSub2APIStatusActiveFailed, err
 	}
 	return RemoteActionSub2APIStatusActive, nil
 }
@@ -261,35 +258,12 @@ func (d *remoteActionDispatcher) restoreNewAPI(ctx context.Context, conn my_site
 	return fmt.Sprintf("newapi_channel_weight_%d", weight), nil
 }
 
-// degradeSub2API / restoreSub2API 是旧 real_connections 对接链路路径下的 sub2api 远端动作：
-// RealConnection.AdminAccountID 在 sub2api 场景下就是 sub2api admin account id（见
-// my_sites.RealConnection 字段注释），只切换账号 active/inactive，不映射 priority。
+// 旧 real_connections 路径没有可靠的原 priority 快照，因此同样禁止改写
+// Sub2API status，也不在这里猜测 priority。
 func (d *remoteActionDispatcher) degradeSub2API(ctx context.Context, conn my_sites.RealConnection) (string, error) {
-	accountID := conn.AdminAccountID
-	if accountID == "" {
-		return RemoteActionUnsupported, nil
-	}
-	session, err := d.sessions.RequireSession(ctx, conn.UserID, conn.WorkspaceAdminAccountID)
-	if err != nil {
-		return RemoteActionUnsupported, err
-	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, "inactive"); err != nil {
-		return RemoteActionSub2APIStatusInactiveFailed, err
-	}
-	return RemoteActionSub2APIStatusInactive, nil
+	return RemoteActionUnsupported, nil
 }
 
 func (d *remoteActionDispatcher) restoreSub2API(ctx context.Context, conn my_sites.RealConnection) (string, error) {
-	accountID := conn.AdminAccountID
-	if accountID == "" {
-		return RemoteActionUnsupported, nil
-	}
-	session, err := d.sessions.RequireSession(ctx, conn.UserID, conn.WorkspaceAdminAccountID)
-	if err != nil {
-		return RemoteActionUnsupported, err
-	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, "active"); err != nil {
-		return RemoteActionSub2APIStatusActiveFailed, err
-	}
-	return RemoteActionSub2APIStatusActive, nil
+	return RemoteActionUnsupported, nil
 }

@@ -117,9 +117,7 @@ func TestActions_NewAPIDegradePanicRecovered(t *testing.T) {
 	}
 }
 
-// TestActions_Sub2APIDegradeUpdatesAccountInactive 验证 sub2api 自动降级会调用
-// UpdateSub2APIAdminAccountStatus(session, accountID, "inactive")，并返回对应的 remoteAction。
-func TestActions_Sub2APIDegradeUpdatesAccountInactive(t *testing.T) {
+func TestActions_Sub2APIDegradeNeverDisablesAccount(t *testing.T) {
 	sites := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
 	sessions := fakeSessionProvider{session: upstream.Session{Platform: upstream.PlatformSub2API}}
 	platform := &fakePlatformActioner{}
@@ -130,17 +128,15 @@ func TestActions_Sub2APIDegradeUpdatesAccountInactive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected sub2api_account_status_inactive, got %s", action)
+	if action != RemoteActionUnsupported {
+		t.Fatalf("expected Sub2API status action to be unsupported, got %s", action)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "sub-account-1" || platform.sub2APICalls[0].status != "inactive" {
-		t.Fatalf("expected one call with accountID=sub-account-1 status=inactive, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("Sub2API monitoring must never disable an account, got %+v", platform.sub2APICalls)
 	}
 }
 
-// TestActions_Sub2APIRestoreUpdatesAccountActive 验证 sub2api 自动恢复会调用
-// UpdateSub2APIAdminAccountStatus(session, accountID, "active")，并返回对应的 remoteAction。
-func TestActions_Sub2APIRestoreUpdatesAccountActive(t *testing.T) {
+func TestActions_Sub2APIRestoreNeverChangesAccountStatus(t *testing.T) {
 	sites := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
 	sessions := fakeSessionProvider{session: upstream.Session{Platform: upstream.PlatformSub2API}}
 	platform := &fakePlatformActioner{}
@@ -151,11 +147,11 @@ func TestActions_Sub2APIRestoreUpdatesAccountActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusActive {
-		t.Fatalf("expected sub2api_account_status_active, got %s", action)
+	if action != RemoteActionUnsupported {
+		t.Fatalf("expected Sub2API status action to be unsupported, got %s", action)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "sub-account-1" || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("expected one call with accountID=sub-account-1 status=active, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("Sub2API monitoring must never change account status, got %+v", platform.sub2APICalls)
 	}
 }
 
@@ -179,11 +175,8 @@ func TestActions_Sub2APIDoesNotUseNewAPIWeightStatus(t *testing.T) {
 	}
 }
 
-// TestActions_Sub2APIRemoteFailureIsReturned 验证平台方法返回错误时，dispatcher 不 panic，
-// 错误可被上层记录；remoteAction 必须是 sub2api_account_status_inactive_failed，不能回退成
-// unsupported——sub2api 已经支持这个动作，真的发起了调用只是失败了，和「不支持」是两回事，
-// 混为一谈会让排查者误判成平台能力问题而不是一次真实的上游调用故障。
-func TestActions_Sub2APIRemoteFailureIsReturned(t *testing.T) {
+// 即使注入的 status API 会报错，旧 real_connections 降级路径也不能触达它。
+func TestActions_Sub2APIDoesNotReachStatusAPI(t *testing.T) {
 	sites := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
 	sessions := fakeSessionProvider{session: upstream.Session{Platform: upstream.PlatformSub2API}}
 	platform := &fakePlatformActioner{sub2APIErr: errors.New("upstream 500")}
@@ -191,17 +184,15 @@ func TestActions_Sub2APIRemoteFailureIsReturned(t *testing.T) {
 
 	conn := my_sites.RealConnection{UpstreamSiteID: "site-1", AdminAccountID: "sub-account-1"}
 	action, err := dispatcher.Degrade(context.Background(), conn, ConnectionHealthState{})
-	if err == nil {
-		t.Fatalf("expected error to propagate")
+	if err != nil {
+		t.Fatalf("status API must not be called: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected sub2api_account_status_inactive_failed, got %s", action)
+	if action != RemoteActionUnsupported || len(platform.sub2APICalls) != 0 {
+		t.Fatalf("expected no Sub2API status call, action=%q calls=%+v", action, platform.sub2APICalls)
 	}
 }
 
-// TestActions_Sub2APIDegradeTargetUpdatesAccountInactive 验证 target 维度的 DegradeTarget
-// 直接用调用方传入的 session + AdminProbeTarget.AccountID，不依赖 real_connections。
-func TestActions_Sub2APIDegradeTargetUpdatesAccountInactive(t *testing.T) {
+func TestActions_Sub2APIDegradeTargetNeverDisablesAccount(t *testing.T) {
 	platform := &fakePlatformActioner{}
 	dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
 
@@ -211,16 +202,15 @@ func TestActions_Sub2APIDegradeTargetUpdatesAccountInactive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected sub2api_account_status_inactive, got %s", action)
+	if action != RemoteActionUnsupported {
+		t.Fatalf("expected unsupported, got %s", action)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != "inactive" {
-		t.Fatalf("expected one call with accountID=acc-1 status=inactive, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("Sub2API target must never be disabled, got %+v", platform.sub2APICalls)
 	}
 }
 
-// TestActions_Sub2APIRestoreTargetUpdatesAccountActive 验证 target 维度的 RestoreTarget。
-func TestActions_Sub2APIRestoreTargetUpdatesAccountActive(t *testing.T) {
+func TestActions_Sub2APIRestoreTargetNeverChangesStatus(t *testing.T) {
 	platform := &fakePlatformActioner{}
 	dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
 
@@ -230,46 +220,81 @@ func TestActions_Sub2APIRestoreTargetUpdatesAccountActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusActive {
-		t.Fatalf("expected sub2api_account_status_active, got %s", action)
+	if action != RemoteActionUnsupported {
+		t.Fatalf("expected unsupported, got %s", action)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("expected one call with accountID=acc-1 status=active, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("Sub2API target status must remain unchanged, got %+v", platform.sub2APICalls)
 	}
 }
 
-// TestActions_Sub2APIDegradeTargetFailureReturnsFailedAction 验证 target 维度 DegradeTarget
-// 在 UpdateSub2APIAdminAccountStatus 返回 error 时，返回 sub2api_account_status_inactive_failed
-// 而不是 unsupported（unsupported 只应表示这个平台/维度本身不支持远端动作）。
-func TestActions_Sub2APIDegradeTargetFailureReturnsFailedAction(t *testing.T) {
+func TestActions_Sub2APIDegradeTargetDoesNotReachFailingStatusAPI(t *testing.T) {
 	platform := &fakePlatformActioner{sub2APIErr: errors.New("upstream 500")}
 	dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
 
 	session := upstream.Session{Platform: upstream.PlatformSub2API}
 	target := AdminProbeTarget{TargetID: "sub2api:ws1:acc-1", Platform: string(upstream.PlatformSub2API), AccountID: "acc-1"}
 	action, err := dispatcher.DegradeTarget(context.Background(), session, target, ConnectionHealthState{})
-	if err == nil {
-		t.Fatalf("expected error to propagate")
+	if err != nil {
+		t.Fatalf("status API must not be called: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected sub2api_account_status_inactive_failed, got %s", action)
+	if action != RemoteActionUnsupported || len(platform.sub2APICalls) != 0 {
+		t.Fatalf("expected no Sub2API status call, action=%q calls=%+v", action, platform.sub2APICalls)
 	}
 }
 
-// TestActions_Sub2APIRestoreTargetFailureReturnsFailedAction 验证 target 维度 RestoreTarget
-// 失败时返回 sub2api_account_status_active_failed，不能回退成 unsupported。
-func TestActions_Sub2APIRestoreTargetFailureReturnsFailedAction(t *testing.T) {
+func TestActions_Sub2APIRestoreTargetDoesNotReachFailingStatusAPI(t *testing.T) {
 	platform := &fakePlatformActioner{sub2APIErr: errors.New("upstream 500")}
 	dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
 
 	session := upstream.Session{Platform: upstream.PlatformSub2API}
 	target := AdminProbeTarget{TargetID: "sub2api:ws1:acc-1", Platform: string(upstream.PlatformSub2API), AccountID: "acc-1"}
 	action, err := dispatcher.RestoreTarget(context.Background(), session, target, ConnectionHealthState{})
-	if err == nil {
-		t.Fatalf("expected error to propagate")
+	if err != nil {
+		t.Fatalf("status API must not be called: %v", err)
 	}
-	if action != RemoteActionSub2APIStatusActiveFailed {
-		t.Fatalf("expected sub2api_account_status_active_failed, got %s", action)
+	if action != RemoteActionUnsupported || len(platform.sub2APICalls) != 0 {
+		t.Fatalf("expected no Sub2API status call, action=%q calls=%+v", action, platform.sub2APICalls)
+	}
+}
+
+func TestActions_LegacySub2APIRestoreNeverWritesInactive(t *testing.T) {
+	platform := &fakePlatformActioner{}
+	dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
+	target := AdminProbeTarget{
+		TargetID: "sub2api:ws1:acc-1", Platform: string(upstream.PlatformSub2API), AccountID: "acc-1",
+	}
+
+	action, err := dispatcher.restoreLegacySub2APIStatus(
+		upstream.Session{Platform: upstream.PlatformSub2API}, target, "inactive",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if action != RemoteActionUnsupported || len(platform.sub2APICalls) != 0 {
+		t.Fatalf("legacy cleanup must never disable an account, action=%q calls=%+v", action, platform.sub2APICalls)
+	}
+}
+
+func TestActions_LegacySub2APIRestoreRequiresExplicitActiveStatus(t *testing.T) {
+	for _, status := range []string{"", "unknown", "enabled"} {
+		t.Run(status, func(t *testing.T) {
+			platform := &fakePlatformActioner{}
+			dispatcher := newRemoteActionDispatcher(fakeSiteLookup{}, fakeSessionProvider{}, platform)
+			target := AdminProbeTarget{
+				TargetID: "sub2api:ws1:acc-1", Platform: string(upstream.PlatformSub2API), AccountID: "acc-1",
+			}
+
+			action, err := dispatcher.restoreLegacySub2APIStatus(
+				upstream.Session{Platform: upstream.PlatformSub2API}, target, status,
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if action != RemoteActionUnsupported || len(platform.sub2APICalls) != 0 {
+				t.Fatalf("ambiguous historical status %q must not reach the status API: action=%q calls=%+v", status, action, platform.sub2APICalls)
+			}
+		})
 	}
 }
 

@@ -7,38 +7,81 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
-func TestReconcileTargetRemoteAction_SuspendedSiblingBlocksRestore(t *testing.T) {
+func TestReconcileTargetRemoteAction_Sub2APINeverWritesStatusOrCreatesSnapshot(t *testing.T) {
+	tests := []struct {
+		name          string
+		state         State
+		weight        int
+		accountStatus string
+	}{
+		{name: "healthy", state: StateHealthy, weight: 100, accountStatus: "active"},
+		{name: "degraded", state: StateDegraded, weight: 75, accountStatus: "active"},
+		{name: "recovering", state: StateRecovering, weight: 25, accountStatus: "active"},
+		{name: "observing", state: StateObserving, weight: 0, accountStatus: "active"},
+		{name: "suspended", state: StateSuspended, weight: 0, accountStatus: "active"},
+		{name: "disabled", state: StateDisabled, weight: 0, accountStatus: "active"},
+		{name: "already inactive", state: StateSuspended, weight: 0, accountStatus: "inactive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			platform := &fakePlatformActioner{}
+			service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
+			targetID := "sub2api:ws1:acc-1"
+			repo.states[targetID] = map[string]ConnectionHealthState{
+				"model-a": {ConnectionID: targetID, ModelName: "model-a", State: tt.state, CurrentWeight: tt.weight},
+			}
+			policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
+			target := AdminProbeTarget{
+				TargetID: targetID, Platform: string(upstream.PlatformSub2API),
+				AccountID: "acc-1", AccountStatus: tt.accountStatus,
+			}
+
+			action, err := service.reconcileTargetRemoteAction(
+				context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API},
+				target, []probeModelSpec{{modelName: "model-a", policy: policy}},
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if action != "" || len(platform.sub2APICalls) != 0 {
+				t.Fatalf("Sub2API reconcile must not write account status, action=%q calls=%+v", action, platform.sub2APICalls)
+			}
+			if len(repo.targetActionStates) != 0 {
+				t.Fatalf("Sub2API reconcile must not create a status snapshot: %+v", repo.targetActionStates)
+			}
+		})
+	}
+}
+
+func TestReconcileTargetRemoteAction_DoesNotTrustLegacyDisableWithoutSnapshot(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
 	targetID := "sub2api:ws1:acc-1"
 	repo.states[targetID] = map[string]ConnectionHealthState{
-		"model-a": {ConnectionID: targetID, ModelName: "model-a", State: StateSuspended, CurrentWeight: 0},
-		"model-b": {ConnectionID: targetID, ModelName: "model-b", State: StateRecovering, CurrentWeight: 25},
+		"gpt-4o": {
+			ConnectionID: targetID, ModelName: "gpt-4o", State: StateSuspended, CurrentWeight: 0,
+			LastRemoteAction: RemoteActionSub2APIStatusInactive,
+		},
 	}
-	repo.targetActionStates["user1|ws1|"+targetID] = TargetActionState{
-		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	target := AdminProbeTarget{
+		TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive",
 	}
 	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
-	specs := []probeModelSpec{{modelName: "model-a", policy: policy}, {modelName: "model-b", policy: policy}}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive"}
 
-	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, specs)
+	action, err := service.reconcileTargetRemoteAction(
+		context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API},
+		target, []probeModelSpec{{modelName: "gpt-4o", policy: policy}},
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if action != "" || len(platform.sub2APICalls) != 0 {
-		t.Fatalf("suspended sibling must keep account inactive, action=%q calls=%+v", action, platform.sub2APICalls)
+		t.Fatalf("stale legacy evidence must not override a potentially manual inactive status, action=%q calls=%+v", action, platform.sub2APICalls)
 	}
-
-	repo.states[targetID]["model-a"] = ConnectionHealthState{ConnectionID: targetID, ModelName: "model-a", State: StateHealthy, CurrentWeight: 100}
-	action, err = service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, specs)
-	if err != nil {
-		t.Fatalf("unexpected restore error: %v", err)
-	}
-	if action != RemoteActionSub2APIStatusActive || len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("account should restore only after every model is safe, action=%q calls=%+v", action, platform.sub2APICalls)
+	if len(repo.targetActionStates) != 0 {
+		t.Fatalf("legacy repair must not create a new status ownership snapshot: %+v", repo.targetActionStates)
 	}
 }
 
@@ -112,80 +155,7 @@ func TestReconcileTargetRemoteAction_ScalesNewAPIWeightFromOriginal(t *testing.T
 	}
 }
 
-func TestReconcileTargetRemoteAction_DoesNotRestoreWithUnprobedControlledModel(t *testing.T) {
-	repo := newFakeRepository()
-	platform := &fakePlatformActioner{}
-	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
-	targetID := "sub2api:ws1:acc-1"
-	repo.states[targetID] = map[string]ConnectionHealthState{
-		"model-a": {ConnectionID: targetID, ModelName: "model-a", State: StateHealthy, CurrentWeight: 100},
-	}
-	repo.targetActionStates["user1|ws1|"+targetID] = TargetActionState{
-		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-		OriginalStatus: "active", LastAppliedStatus: "inactive",
-	}
-	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
-	specs := []probeModelSpec{{modelName: "model-a", policy: policy}, {modelName: "model-b", policy: policy}}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive"}
-
-	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, specs)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if action != "" || len(platform.sub2APICalls) != 0 {
-		t.Fatalf("missing model state must keep the managed target inactive: action=%q calls=%+v", action, platform.sub2APICalls)
-	}
-}
-
-func TestReconcileTargetRemoteAction_DoesNotEnableInitiallyDisabledTarget(t *testing.T) {
-	repo := newFakeRepository()
-	platform := &fakePlatformActioner{}
-	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
-	targetID := "sub2api:ws1:acc-1"
-	repo.states[targetID] = map[string]ConnectionHealthState{
-		"model-a": {ConnectionID: targetID, ModelName: "model-a", State: StateRecovering, CurrentWeight: 25},
-	}
-	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive"}
-
-	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, []probeModelSpec{{modelName: "model-a", policy: policy}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if action != RemoteActionSkippedTargetInitiallyDisabled || len(platform.sub2APICalls) != 0 {
-		t.Fatalf("initially disabled target must not be enabled, action=%q calls=%+v", action, platform.sub2APICalls)
-	}
-}
-
-func TestReconcileTargetRemoteAction_ConfirmsPendingSystemWrite(t *testing.T) {
-	repo := newFakeRepository()
-	platform := &fakePlatformActioner{}
-	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
-	targetID := "sub2api:ws1:acc-1"
-	repo.states[targetID] = map[string]ConnectionHealthState{
-		"model-a": {ConnectionID: targetID, ModelName: "model-a", State: StateSuspended, CurrentWeight: 0},
-	}
-	repo.targetActionStates["user1|ws1|"+targetID] = TargetActionState{
-		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-		OriginalStatus: "active", LastAppliedStatus: "active", PendingStatus: "inactive",
-	}
-	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive"}
-
-	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, []probeModelSpec{{modelName: "model-a", policy: policy}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	stored := repo.targetActionStates["user1|ws1|"+targetID]
-	if action != "" || stored.Conflict || stored.PendingStatus != "" || stored.LastAppliedStatus != "inactive" {
-		t.Fatalf("pending system write should be confirmed without conflict: action=%q stored=%+v", action, stored)
-	}
-	if len(platform.sub2APICalls) != 0 {
-		t.Fatalf("already-applied pending action must not be repeated: %+v", platform.sub2APICalls)
-	}
-}
-
-func TestRestoreUnmanagedTargetActions_RestoresAfterPolicyUnbound(t *testing.T) {
+func TestRestoreUnmanagedTargetActions_RestoresLegacySub2APIStatusExactlyOnce(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	reader := fakePlatformGroupReader{
@@ -205,15 +175,61 @@ func TestRestoreUnmanagedTargetActions_RestoresAfterPolicyUnbound(t *testing.T) 
 	}
 	repo.targetActionStates["user1|ws1|"+targetID] = stored
 
-	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, make(adminInventoryCache))
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("unbound policy should restore the original upstream state: %+v", platform.sub2APICalls)
+	states, err := repo.ListAllTargetActionStates(context.Background())
+	if err != nil {
+		t.Fatalf("list legacy snapshots: %v", err)
+	}
+	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, states, nil, make(adminInventoryCache))
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != stored.OriginalStatus {
+		t.Fatalf("legacy snapshot must restore its exact original status once: %+v", platform.sub2APICalls)
 	}
 	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored unmanaged target must release its action snapshot")
+		t.Fatal("restored legacy snapshot must be deleted")
 	}
-	if len(repo.events) != 1 || repo.events[0].Result != "policy_unmanaged_restore" {
+	if len(repo.events) != 1 || repo.events[0].Result != "policy_unmanaged_restore" || repo.events[0].RemoteAction != RemoteActionSub2APIStatusActive {
 		t.Fatalf("restore should be traceable in events: %+v", repo.events)
+	}
+
+	states, err = repo.ListAllTargetActionStates(context.Background())
+	if err != nil {
+		t.Fatalf("list snapshots after restore: %v", err)
+	}
+	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, states, nil, make(adminInventoryCache))
+	if len(platform.sub2APICalls) != 1 || len(repo.events) != 1 {
+		t.Fatalf("deleted snapshot must not restore again, calls=%+v events=%+v", platform.sub2APICalls, repo.events)
+	}
+}
+
+func TestRestoreUnmanagedTargetActions_DoesNotOverwriteManualSub2APIStatusConflict(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Status: "active", Models: "gpt-4o"}},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader, dispatcher: newRemoteActionDispatcher(nil, nil, platform),
+	}
+	targetID := "sub2api:ws1:acc-1"
+	stored := TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	}
+	repo.targetActionStates["user1|ws1|"+targetID] = stored
+
+	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, nil, make(adminInventoryCache))
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("manual status change must not be overwritten: %+v", platform.sub2APICalls)
+	}
+	got, exists := repo.targetActionStates["user1|ws1|"+targetID]
+	if !exists || !got.Conflict || got.PendingStatus != "" {
+		t.Fatalf("manual status change must retain a conflict snapshot: exists=%v state=%+v", exists, got)
+	}
+	if len(repo.events) != 0 {
+		t.Fatalf("manual conflict must not emit a restore event: %+v", repo.events)
 	}
 }
 
@@ -247,7 +263,7 @@ func TestRestoreUnmanagedTargetActions_RestoresWhenAutoDegradeDisabled(t *testin
 
 	service.restoreUnmanagedTargetActions(
 		context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil,
-		[]TargetActionState{stored}, make(adminInventoryCache),
+		[]TargetActionState{stored}, nil, make(adminInventoryCache),
 	)
 	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
 		t.Fatalf("turning off auto degrade must release the captured upstream state: %+v", platform.sub2APICalls)
@@ -257,7 +273,68 @@ func TestRestoreUnmanagedTargetActions_RestoresWhenAutoDegradeDisabled(t *testin
 	}
 }
 
-func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *testing.T) {
+func TestRestoreUnmanagedTargetActions_DefersLegacySub2APIStatusUntilPriorityIsBlocked(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	blockedPriority := sub2APIBlockedPriority
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Status: "inactive", Priority: &blockedPriority, Models: "gpt-4o"}},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader, dispatcher: newRemoteActionDispatcher(nil, nil, platform),
+	}
+	targetID := "sub2api:ws1:acc-1"
+	stored := TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	}
+	policy := Policy{
+		ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		AutoDegradeEnabled: true, AutoRemoteActionEnabled: true,
+		ModelTargets: []ModelTarget{{ModelName: "gpt-4o", Enabled: true}},
+	}
+	assignment := GroupPolicyAssignment{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}
+	repo.states[targetID] = map[string]ConnectionHealthState{
+		"gpt-4o": {ConnectionID: targetID, ModelName: "gpt-4o", State: StateSuspended, CurrentWeight: 0},
+	}
+
+	service.restoreUnmanagedTargetActions(
+		context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil,
+		[]TargetActionState{stored}, nil, make(adminInventoryCache),
+	)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("legacy status must stay inactive until priority takeover succeeds: %+v", platform.sub2APICalls)
+	}
+
+	priorityState := PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalPriority: 7, LastAppliedPriority: sub2APIBlockedPriority,
+		EffectiveMultiplier: healthPriorityMultiplierSentinel,
+	}
+	blockedPriority = 23
+	service.restoreUnmanagedTargetActions(
+		context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil,
+		[]TargetActionState{stored}, []PrioritySyncState{priorityState}, make(adminInventoryCache),
+	)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("a current priority that differs from the checkpoint must defer legacy restore: %+v", platform.sub2APICalls)
+	}
+
+	blockedPriority = sub2APIBlockedPriority
+	service.restoreUnmanagedTargetActions(
+		context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil,
+		[]TargetActionState{stored}, []PrioritySyncState{priorityState}, make(adminInventoryCache),
+	)
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
+		t.Fatalf("confirmed priority takeover should permit one legacy active restore: %+v", platform.sub2APICalls)
+	}
+}
+
+func TestRestoreUnmanagedTargetActions_DoesNotRestoreInvisibleSub2APITarget(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	service := &Service{
@@ -271,11 +348,11 @@ func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *tes
 	}
 	repo.targetActionStates["user1|ws1|"+targetID] = stored
 
-	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, make(adminInventoryCache))
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("target removed from every group should still restore by stable target id: %+v", platform.sub2APICalls)
+	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, nil, make(adminInventoryCache))
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("an invisible Sub2API target has no current status for conflict detection: %+v", platform.sub2APICalls)
 	}
-	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored missing target must release its action snapshot")
+	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; !exists {
+		t.Fatal("invisible target must retain its checkpoint until it can be checked safely")
 	}
 }

@@ -13,6 +13,10 @@ const (
 	RemoteActionSkippedTargetInitiallyDisabled = "skipped_target_initially_disabled"
 )
 
+type legacySub2APIStatusRestorer interface {
+	restoreLegacySub2APIStatus(session upstream.Session, target AdminProbeTarget, status string) (remoteAction string, err error)
+}
+
 // reconcileTargetRemoteAction 把同一账号当前仍启用的全部模型状态聚合成一次上游动作。
 // 模型仍独立记录健康，但账号/渠道是共享资源，不能让后执行的健康模型覆盖先前故障模型的停用决定。
 func (s *Service) reconcileTargetRemoteAction(
@@ -23,6 +27,13 @@ func (s *Service) reconcileTargetRemoteAction(
 	target AdminProbeTarget,
 	specs []probeModelSpec,
 ) (string, error) {
+	// Sub2API 账号不得再被分组监控切换 active/inactive。故障降级由
+	// priority_strategy.go 统一接管。没有动作快照时也不能根据陈旧事件推断
+	// status 所有权，否则可能覆盖管理员后来手动停用账号的决定。
+	if target.Platform == string(upstream.PlatformSub2API) {
+		return "", nil
+	}
+
 	controlledModels := make(map[string]struct{})
 	for _, spec := range specs {
 		if spec.policy.Enabled && policyRemoteActionEnabled(spec.policy) {
@@ -142,6 +153,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupAssignments []GroupPolicyAssignment,
 	exclusions []GroupTargetExclusion,
 	states []TargetActionState,
+	priorityStates []PrioritySyncState,
 	inventoryCache adminInventoryCache,
 ) {
 	if len(states) == 0 {
@@ -150,6 +162,10 @@ func (s *Service) restoreUnmanagedTargetActions(
 	targetPolicies := assignedEnabledPoliciesByTarget(policies, targetAssignments)
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
+	priorityByTarget := make(map[string]PrioritySyncState, len(priorityStates))
+	for _, state := range priorityStates {
+		priorityByTarget[state.UserID+"|"+state.AdminAccountID+"|"+state.TargetID] = state
+	}
 	for _, stored := range states {
 		inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
 		if err != nil {
@@ -168,6 +184,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 			continue
 		}
 		var target AdminProbeTarget
+		var currentPriority *int
 		found := false
 		effectivePolicies := append([]Policy(nil), targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]...)
 		for _, groupInventory := range inventory.groups {
@@ -189,13 +206,18 @@ func (s *Service) restoreUnmanagedTargetActions(
 					}
 					found = true
 				}
+				if currentPriority == nil && account.Priority != nil {
+					currentPriority = cloneIntPointer(account.Priority)
+				}
 				workspaceKey := stored.UserID + "|" + stored.AdminAccountID
 				if !excluded[workspaceKey][groupInventory.group.ID][targetID] {
 					effectivePolicies = mergePoliciesByID(effectivePolicies, groupPolicies[workspaceKey][groupInventory.group.ID])
 				}
 			}
 		}
-		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
+		// Sub2API status 动作已下线。即使策略仍绑定，也可在账号可见且所有权
+		// 校验通过后恢复旧快照；NewAPI 仍按现有策略判定是否继续接管。
+		if inventory.session.Platform != upstream.PlatformSub2API && hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
 			continue
 		}
 		targetVisible := found
@@ -204,9 +226,14 @@ func (s *Service) restoreUnmanagedTargetActions(
 			if !ok || parsed.adminAccountID != stored.AdminAccountID || parsed.platform != string(inventory.session.Platform) {
 				continue
 			}
-			// The account can remain upstream after being removed from every group. We no longer
-			// have a list snapshot for conflict detection, but restoring the captured original
-			// value is safer than leaving a system-disabled account stuck forever.
+			if inventory.session.Platform == upstream.PlatformSub2API {
+				// Without a visible account row there is no current status for conflict
+				// detection. Keep the checkpoint, but never guess that inactive is still
+				// system-owned and overwrite a later manual decision.
+				continue
+			}
+			// Preserve the existing NewAPI cleanup behavior: the channel can remain
+			// upstream after being removed from every group and is still addressable by ID.
 			target = AdminProbeTarget{
 				TargetID: stored.TargetID, Platform: parsed.platform, AccountID: parsed.accountID,
 				AccountStatus: stored.LastAppliedStatus, AccountWeight: cloneIntPointer(stored.LastAppliedWeight),
@@ -229,13 +256,30 @@ func (s *Service) restoreUnmanagedTargetActions(
 			}
 			continue
 		}
+		if target.Platform == string(upstream.PlatformSub2API) {
+			priorityState, hasPriorityState := priorityByTarget[stored.UserID+"|"+stored.AdminAccountID+"|"+stored.TargetID]
+			if !s.legacySub2APIStatusRestoreReady(ctx, target, effectivePolicies, currentPriority, priorityState, hasPriorityState) {
+				continue
+			}
+		}
 		stored.PendingStatus = stored.OriginalStatus
 		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
 		if err := s.repo.UpsertTargetActionState(ctx, stored); err != nil {
 			log.Printf("[connection-health] store unmanaged target restore intent failed target_id=%s err=%v", stored.TargetID, err)
 			continue
 		}
-		action, actionErr := s.dispatcher.ApplyTargetState(ctx, inventory.session, target, stored.OriginalWeight, stored.OriginalStatus)
+		var action string
+		var actionErr error
+		if target.Platform == string(upstream.PlatformSub2API) {
+			restorer, ok := s.dispatcher.(legacySub2APIStatusRestorer)
+			if !ok {
+				log.Printf("[connection-health] legacy sub2api status restore unavailable target_id=%s", stored.TargetID)
+				continue
+			}
+			action, actionErr = restorer.restoreLegacySub2APIStatus(inventory.session, target, stored.OriginalStatus)
+		} else {
+			action, actionErr = s.dispatcher.ApplyTargetState(ctx, inventory.session, target, stored.OriginalWeight, stored.OriginalStatus)
+		}
 		if actionErr != nil {
 			log.Printf("[connection-health] restore unmanaged target failed target_id=%s action=%s err=%v", stored.TargetID, action, actionErr)
 			continue
@@ -245,6 +289,33 @@ func (s *Service) restoreUnmanagedTargetActions(
 			log.Printf("[connection-health] clear unmanaged target action state failed target_id=%s err=%v", stored.TargetID, err)
 		}
 	}
+}
+
+func (s *Service) legacySub2APIStatusRestoreReady(
+	ctx context.Context,
+	target AdminProbeTarget,
+	policies []Policy,
+	currentPriority *int,
+	priorityState PrioritySyncState,
+	hasPriorityState bool,
+) bool {
+	healthStates, err := s.repo.ListStatesByConnection(ctx, target.TargetID)
+	if err != nil {
+		log.Printf("[connection-health] legacy sub2api restore health state read failed target_id=%s err=%v", target.TargetID, err)
+		return false
+	}
+	eligible, allHealthy, _ := sub2APIRemotePriorityStatus(
+		&priorityTargetInventory{target: target, policies: policies}, healthStates,
+	)
+	if !eligible || allHealthy {
+		return true
+	}
+	return currentPriority != nil &&
+		hasPriorityState &&
+		priorityState.EffectiveMultiplier == healthPriorityMultiplierSentinel &&
+		*currentPriority == priorityState.LastAppliedPriority &&
+		priorityState.PendingPriority == nil &&
+		!priorityState.Conflict
 }
 
 func hasRemoteActionModel(specs []probeModelSpec) bool {
@@ -312,10 +383,8 @@ func desiredTargetState(platform string, allHealthy bool, blocked bool, minWeigh
 		weight := scaledTargetWeight(stored.OriginalWeight, minWeight)
 		return "1", &weight
 	}
-	if blocked {
-		return "inactive", nil
-	}
-	return "active", nil
+	// Sub2API 的常规监控不再拥有 status 写权；这个防御性返回保持原状态。
+	return stored.OriginalStatus, nil
 }
 
 // scaledTargetWeight converts the state machine's 0-100 recovery percentage into the

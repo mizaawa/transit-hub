@@ -873,7 +873,7 @@ export default {
       title: '分组健康',
       subtitle: '对当前 admin workspace 下分组内的账号/渠道做独立轻量探活，监控健康状态并支持自动降级/恢复。',
       adminSubtitle: '展示当前 admin workspace 下的全量分组，点击账号数查看分组下账号/渠道及独立探活状态。',
-      simplifiedSubtitle: '以 admin 上游分组为单位配置探活、自动降级与流量优先级，新增账号或渠道会自动继承分组策略。',
+      simplifiedSubtitle: '以 admin 上游分组为单位配置探活、自动降级与上游流量控制；Sub2API 只调整优先级，绝不会停用账号，NewAPI 继续调整 channel 权重/状态。新增账号或渠道会自动继承分组策略。',
       summaryLabel: '分组健康汇总',
       groupListLabel: '上游分组列表',
       refresh: '刷新',
@@ -1001,7 +1001,7 @@ export default {
           options: {
             multiplier: {
               title: '倍率优先',
-              description: '健康目标中，倍率越低，上游优先级越高；故障目标仍会优先降级。'
+              description: '健康目标中倍率越低，上游优先级越高；进入阻断状态时，Sub2API 仅降低优先级并在完全恢复后还原，NewAPI 调整 channel 权重/状态。'
             },
             multiplierOnly: {
               title: '仅倍率优先级',
@@ -1009,11 +1009,11 @@ export default {
             },
             stable: {
               title: '稳定优先',
-              description: '自动探活并按平台能力禁用故障目标、恢复健康目标，不修改日常优先级。'
+              description: '自动探活且不按倍率排序日常优先级；进入阻断状态时，Sub2API 仅降低优先级并在完全恢复后还原，NewAPI 调整 channel 权重/状态。'
             },
             monitor: {
               title: '仅监控',
-              description: '记录健康状态和事件，不执行任何上游禁用、恢复或优先级调整。'
+              description: '记录健康状态和事件，不修改上游优先级、权重或状态。'
             },
             existing: {
               title: '使用已有策略',
@@ -1029,7 +1029,7 @@ export default {
           },
           providerLabel: '模型 Provider',
           remoteActionLabel: '执行上游动作',
-          remoteActionHelp: '故障和恢复时按平台能力自动禁用或恢复目标',
+          remoteActionHelp: 'Sub2API 绝不会停用账号：进入阻断状态时仅降低优先级，完全恢复后还原；NewAPI 调整 channel 权重/状态',
           multiplierOnlyTitle: '仅同步倍率优先级',
           multiplierOnlyHelp: '后台约每 30 秒读取一次最新分组倍率；倍率越低，优先级越高。此模式不需要模型或上游探活凭据。',
           multiplierMissingTitle: '选中账号没有有效倍率来源',
@@ -1047,7 +1047,7 @@ export default {
           remoteAction: '上游自动动作',
           enabled: '已启用',
           disabled: '未启用',
-          multiplierRule: '倍率排序规则：健康状态优先于价格；同一目标属于多个分组时使用最低倍率；倍率越低，写入上游的优先级越高。若检测到人工修改，系统会停止覆盖并提示冲突。',
+          multiplierRule: '倍率排序规则：健康状态优先于价格；同一目标属于多个分组时使用最低倍率；倍率越低，写入上游的优先级越高。启用上游动作后，Sub2API 进入阻断状态只会降低优先级，完全恢复后还原原优先级，绝不会停用账号；NewAPI 继续调整 channel 权重/状态。若检测到人工修改，系统会停止覆盖并提示冲突。',
           multiplierOnlyRule: '仅倍率规则：不读取健康状态、不发起模型探活；同一目标属于多个分组时使用最低倍率。停用或解绑策略后会恢复接管前的优先级，人工修改仍受冲突保护。'
         },
         back: '上一步',
@@ -1253,13 +1253,13 @@ export default {
         autoDegradeLabel: '自动降级',
         autoDegradeHelp: '探活失败达到阈值时自动降低本地权重或暂停链路。',
         autoRemoteActionLabel: '自动远端动作',
-        autoRemoteActionHelp: 'NewAPI 会修改 channel 权重/状态，Sub2API 会切换 admin 账号 active/inactive。关闭后只记录健康结果，不调用上游。',
-        priorityModeLabel: '上游流量优先级',
+        autoRemoteActionHelp: 'NewAPI 会调整 channel 权重/状态；Sub2API 绝不会把 admin 账号设为 inactive，仅在进入阻断状态时降低上游优先级，并在完全恢复后还原。关闭后，健康状态转换不会调用上游；若另行启用倍率排序，仍会同步 priority。',
+        priorityModeLabel: '日常优先级排序',
         priorityModes: {
-          none: '保持上游设置',
+          none: '不按倍率排序',
           multiplier: '按分组倍率排序'
         },
-        priorityModeHelp: '开启倍率排序后，系统会在健康目标中优先使用更低倍率的上游；故障状态始终优先降级。',
+        priorityModeHelp: '开启倍率排序后，系统会在健康目标中优先使用更低倍率的上游。健康阻断由自动远端动作独立处理：Sub2API 临时降低优先级，NewAPI 调整 channel 权重/状态。',
         multiplierOnlySummaryTitle: '倍率越低，优先级越高',
         multiplierOnlySummary: '系统约每 30 秒读取最新分组倍率并同步上游优先级，不解析探活凭据、不请求模型、不消耗探活预算，也不执行自动降级或远端动作。检测到人工修改时会停止覆盖。',
         providerLabel: '模型 Provider',
@@ -1279,8 +1279,8 @@ export default {
           observation: '人工恢复或自动恢复流程触发后会进入观察期，这段时间的连续探活结果用于确认链路是否真的已经稳定。',
           recoveryStep: '恢复过程中每次探活成功会按该百分比逐步提高本地权重，不是一次性恢复到 100%。',
           autoDegrade: '开启后，探活结果会推进链路的健康状态机并调整本地转发权重；关闭后只记录探活结果，不会自动改变状态或权重。',
-          autoRemoteAction: '开启后，状态机触发降级/恢复时会执行受支持的上游动作：Sub2API 切换 admin 账号 active/inactive，NewAPI 调整 channel 权重/状态。关闭后只记录探活和状态结果。',
-          priorityMode: '按分组倍率排序会把较低倍率映射为较高的上游优先级。健康等级先于价格排序；同一目标属于多个分组时取最低倍率；检测到人工修改时会停止自动覆盖。'
+          autoRemoteAction: '开启后，状态机需要阻断或恢复上游流量时会执行平台动作：Sub2API 绝不会把 admin 账号设为 inactive，只在阻断时降低上游优先级，并在目标完全恢复后还原原优先级；NewAPI 调整 channel 权重/状态。关闭后，健康状态转换只记录结果；若另行启用倍率排序，仍会同步 priority。',
+          priorityMode: '按分组倍率排序只管理日常优先级：较低倍率映射为较高优先级，健康等级先于价格排序，同一目标属于多个分组时取最低倍率。健康阻断的上游动作独立于此设置；检测到人工修改时会停止自动覆盖。'
         },
         runFlow: {
           buttonLabel: '运行流程',
@@ -1318,7 +1318,7 @@ export default {
             },
             autoDegradeVsRemoteAction: {
               title: '8. 自动降级和自动远端动作的区别',
-              description: '自动降级只影响系统内部的状态机和本地展示权重，不会调用任何上游平台接口，属于低风险开关。自动远端动作只有策略显式开启（自动远端动作=开）且状态机判定需要远端动作时才会真实调用上游：NewAPI 对接链路路径会修改 channel 权重/状态；当前分组健康独立探活路径下，Sub2API target 会切换 admin 账号 active/inactive（不调整 priority），NewAPI target 维度暂未实现远端动作，会记录为 unsupported，不会真正调用上游。策略未开启自动远端动作时，两条路径都只记录 skipped，绝不调用任何上游接口。'
+              description: '自动降级只影响系统内部的状态机和本地展示权重，不会调用任何上游平台接口。自动远端动作只有策略显式开启且状态机判定需要阻断或恢复上游流量时才会调用上游：NewAPI 调整 channel 权重/状态；Sub2API 绝不会把 admin 账号设为 inactive，阻断时只降低上游优先级，并且只有目标完全恢复为健康后才还原原优先级。策略未开启自动远端动作时，健康状态转换只记录 skipped；若另行启用倍率排序，仍会同步 priority。'
             },
             manualProbe: {
               title: '9. 手动探活',

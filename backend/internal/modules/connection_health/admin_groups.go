@@ -277,7 +277,9 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			assignmentSource := policyAssignmentSource(explicitIDs, inheritedIDs)
 			priorityState, priorityManaged := priorityByTarget[targetID]
 			var effectiveMultiplier *float64
-			if priorityManaged {
+			// Negative values are internal ownership markers for Sub2API health-only
+			// priority management, not real account multipliers.
+			if priorityManaged && priorityState.EffectiveMultiplier >= 0 {
 				value := priorityState.EffectiveMultiplier
 				effectiveMultiplier = &value
 			}
