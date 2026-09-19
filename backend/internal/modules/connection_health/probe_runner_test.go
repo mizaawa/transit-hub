@@ -10,29 +10,35 @@ import (
 	"time"
 )
 
-// TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint 验证 real_connections
+// TestProbe_AllProviderFamiliesUseResponsesGatewayEndpoint 验证 real_connections
 // 里的 base_url/upstream_key 是 new-api/sub2api 网关凭据，不是 provider 官方凭据：
 // 无论 providerFamily 是 gemini/anthropic/openai/custom，探活请求都必须统一打到
-// {baseURL}/v1/chat/completions，用 Bearer <upstreamKey> 鉴权，不能拼 Gemini
-// generateContent 或 Anthropic messages 原生端点，否则网关会返回 404/未知路径导致
-// Gemini/Anthropic 探活被系统性误判为失败。
-func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.T) {
+// {baseURL}/v1/responses，用 Bearer <upstreamKey> 鉴权，并使用 Responses API 请求体。
+func TestProbe_AllProviderFamiliesUseResponsesGatewayEndpoint(t *testing.T) {
 	providerFamilies := []string{ProviderGemini, ProviderAnthropic, ProviderOpenAI, ProviderCustom}
 
 	for _, family := range providerFamilies {
 		t.Run(family, func(t *testing.T) {
+			var gotMethod string
 			var gotPath string
 			var gotAuth string
-			var gotMaxTokens float64
+			var gotInput string
+			var gotMaxOutputTokens float64
+			var hasLegacyMessages bool
+			var hasLegacyMaxTokens bool
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
 				gotPath = r.URL.Path
 				gotAuth = r.Header.Get("Authorization")
 				var body map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&body)
-				gotMaxTokens, _ = body["max_tokens"].(float64)
+				gotInput, _ = body["input"].(string)
+				gotMaxOutputTokens, _ = body["max_output_tokens"].(float64)
+				_, hasLegacyMessages = body["messages"]
+				_, hasLegacyMaxTokens = body["max_tokens"]
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+				_, _ = w.Write([]byte(`{"id":"resp_test","object":"response","status":"completed","output":[]}`))
 			}))
 			defer server.Close()
 
@@ -43,14 +49,23 @@ func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.
 			if outcome.Result != ResultOK {
 				t.Fatalf("expected ok, got %s (%s)", outcome.Result, outcome.Detail)
 			}
-			if gotPath != "/v1/chat/completions" {
-				t.Fatalf("expected gateway-compatible path /v1/chat/completions, got %s", gotPath)
+			if gotMethod != http.MethodPost {
+				t.Fatalf("expected POST, got %s", gotMethod)
+			}
+			if gotPath != "/v1/responses" {
+				t.Fatalf("expected Responses API path /v1/responses, got %s", gotPath)
 			}
 			if gotAuth != "Bearer gateway-key" {
 				t.Fatalf("expected Bearer auth with gateway key, got %q", gotAuth)
 			}
-			if gotMaxTokens != 1 {
-				t.Fatalf("expected max_probe_tokens=1 to propagate, got %v", gotMaxTokens)
+			if gotInput != defaultProbePrompt {
+				t.Fatalf("expected Responses input %q, got %q", defaultProbePrompt, gotInput)
+			}
+			if gotMaxOutputTokens != minResponsesOutputTokens {
+				t.Fatalf("expected max_probe_tokens below Responses minimum to normalize to %d, got %v", minResponsesOutputTokens, gotMaxOutputTokens)
+			}
+			if hasLegacyMessages || hasLegacyMaxTokens {
+				t.Fatalf("legacy Chat Completions fields must not be sent: messages=%v max_tokens=%v", hasLegacyMessages, hasLegacyMaxTokens)
 			}
 		})
 	}
@@ -71,7 +86,7 @@ func TestProbe_DefaultModelPerProviderWhenModelNameEmpty(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			gotModel, _ = body["model"].(string)
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+			_, _ = w.Write([]byte(`{"id":"resp_test","object":"response","status":"completed","output":[]}`))
 		}))
 
 		runner := NewRealProbeRunner()

@@ -17,6 +17,11 @@ const ProbeTimeout = 10 * time.Second
 
 const defaultProbePrompt = "hi"
 
+// Responses API requires max_output_tokens to be at least 16. Keep the
+// existing policy values backward-compatible by normalizing older values at
+// the request boundary instead of making every stored policy migrate at once.
+const minResponsesOutputTokens = 16
+
 // ProbeRequest 是发起一次真实轻量探活所需的全部参数。UpstreamKey 只用于构造请求凭据，
 // 探活结果（ProbeOutcome）绝不回填明文 key。
 type ProbeRequest struct {
@@ -42,8 +47,8 @@ func NewRealProbeRunner() *RealProbeRunner {
 // 正常的上游错误都归类进 ProbeOutcome.Result，不通过 error 返回。
 func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutcome {
 	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 1
+	if maxTokens < minResponsesOutputTokens {
+		maxTokens = minResponsesOutputTokens
 	}
 	prompt := strings.TrimSpace(req.ProbePrompt)
 	if prompt == "" {
@@ -67,17 +72,11 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 	return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
 }
 
-// buildProbeRequest 统一走 OpenAI 兼容的 /v1/chat/completions 网关端点。
+// buildProbeRequest 统一走 OpenAI 兼容的 /v1/responses 网关端点。
 //
-// 背景（对应整改任务书第 4 项）：real_connections.upstream_key 和
-// upstream_site_id -> upstream_sites.base_url 代表的是已对接的 new-api / sub2api 网关凭据
-// 和网关地址（一个可转发 Gemini/Anthropic/OpenAI 等多种模型的中转站点），不是 provider
-// 官方凭据。new-api 和 sub2api 都以 OpenAI 兼容协议对外暴露 /v1/chat/completions，
-// 内部按 model 名称路由到实际 provider。如果对这些网关直接打 Gemini
-// generateContent / Anthropic messages 原生端点，网关大概率不认识这些路径，会导致
-// Gemini/Anthropic 模型被系统性误判为失败，进而错误触发自动降级。
-// providerFamily 目前只用于在 ModelName 为空时选择一个合理的默认模型名做探活，
-// 不再影响实际请求的 endpoint/鉴权方式。
+// base_url/key 是 new-api / sub2api 网关凭据，不是 provider 官方凭据；因此
+// Gemini/Anthropic/OpenAI 等模型都通过网关的 Responses 兼容端点探活。
+// providerFamily 只用于 ModelName 为空时选择默认模型，不影响 endpoint 或鉴权方式。
 func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, maxTokens int) (*http.Request, error) {
 	baseURL := strings.TrimRight(req.BaseURL, "/")
 	model := req.ModelName
@@ -85,11 +84,11 @@ func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, max
 		model = defaultModelForProvider(req.ProviderFamily)
 	}
 
-	endpoint := baseURL + "/v1/chat/completions"
+	endpoint := baseURL + "/v1/responses"
 	payload := map[string]any{
-		"model":      model,
-		"max_tokens": maxTokens,
-		"messages":   []map[string]any{{"role": "user", "content": prompt}},
+		"model":             model,
+		"max_output_tokens": maxTokens,
+		"input":             prompt,
 	}
 	headers := map[string]string{"Authorization": "Bearer " + req.UpstreamKey}
 	return newJSONRequest(ctx, http.MethodPost, endpoint, payload, headers)

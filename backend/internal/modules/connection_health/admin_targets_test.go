@@ -223,7 +223,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceNeverUpdatesStatus(t *testing
 	bulkUpdateCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"boom"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/accounts/bulk-update":

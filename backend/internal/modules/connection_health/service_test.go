@@ -949,7 +949,7 @@ func newProbeTestService(t *testing.T) (*Service, *fakeRepository, *httptest.Ser
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"id":"resp_test","object":"response","status":"completed","output":[]}`))
 	}))
 
 	repo := newFakeRepository()
